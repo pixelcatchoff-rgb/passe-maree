@@ -9,7 +9,7 @@ const ZONE = {
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -27,7 +27,7 @@ const parseLocal = s => { const [d, t] = s.split("T"); const [y, mo, da] = d.spl
 const dur = m => { m = Math.round(m); return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + pad(m % 60); };
 
 /* ---------- état ---------- */
-const KEY = "passemaree.v1", TKEY = "passemaree.tide.v1";
+const KEY = "passemaree.v1", HKEY = "passemaree.harm.v1";
 function load(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { toast("Mémoire du téléphone pleine"); } }
 const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, nm: ZONE.nm, scale: 1, layers: { seamark: true, depth: false }, view: null };
@@ -36,52 +36,51 @@ S.layers = Object.assign({}, DEF.layers, S.layers || {});
 const persist = () => save(KEY, S);
 
 let day = todayStr(), cur = nowMin(), selId = S.points[0] && S.points[0].id;
-let tide = load(TKEY);            // {fetched, step, series:[[t,h]...]}  h = niveau / NM
+let harm = load(HKEY);            // {fittedAt, F}  composantes harmoniques calculées
+let P = harm ? Harmo.predictor(harm.F) : null;
 let tideState = "idle";           // idle | loading | ok | error
 
-/* ---------- marée automatique (Open-Meteo) ---------- */
+/* ---------- marée automatique : série Open-Meteo -> analyse harmonique -> prédiction sur des mois ---------- */
+const ymd = d => d.toISOString().slice(0, 10);
 async function fetchTide(force) {
-  if (!force && tide && Date.now() - tide.fetched < 6 * 3600e3 && coversDay(todayStr())) return;
+  if (!force && harm && Date.now() - harm.fittedAt < 30 * 864e5) return;
   tideState = "loading"; render();
-  const base = "https://marine-api.open-meteo.com/v1/marine?latitude=" + ZONE.tideLat + "&longitude=" + ZONE.tideLon + "&timezone=Europe%2FParis";
+  const base = "https://marine-api.open-meteo.com/v1/marine?latitude=" + ZONE.tideLat + "&longitude=" + ZONE.tideLon + "&timezone=GMT&hourly=sea_level_height_msl";
+  const now = new Date(), back = n => ymd(new Date(now.getTime() - n * 864e5));
   const tries = [
-    base + "&minutely_15=sea_level_height_msl&past_days=2&forecast_days=8",
-    base + "&hourly=sea_level_height_msl&past_days=2&forecast_days=8",
-    base + "&hourly=sea_level_height_msl&forecast_days=7"
+    base + "&start_date=" + back(366) + "&end_date=" + back(1),
+    base + "&start_date=" + back(183) + "&end_date=" + back(1),
+    base + "&past_days=92&forecast_days=8"
   ];
   for (const url of tries) {
     try {
       const r = await fetch(url);
       if (!r.ok) continue;
-      const j = await r.json();
-      const blk = j.minutely_15 && j.minutely_15.sea_level_height_msl ? j.minutely_15 : j.hourly;
+      const j = await r.json(), blk = j.hourly;
       if (!blk || !blk.time) continue;
-      const series = [];
-      blk.time.forEach((t, i) => { const h = blk.sea_level_height_msl[i]; if (h !== null && isFinite(h)) series.push([parseLocal(t), h]); });
-      if (series.length < 10) continue;
-      tide = { fetched: Date.now(), step: blk === j.hourly ? 60 : 15, series };
-      save(TKEY, tide); tideState = "ok"; render(); return;
+      const t = [], h = [];
+      blk.time.forEach((x, i) => { const v = blk.sea_level_height_msl[i]; if (v !== null && isFinite(v)) { t.push(Date.parse(x + ":00Z")); h.push(v); } });
+      if (t.length < 14 * 24) continue;
+      await new Promise(res => setTimeout(res, 30)); // laisse l'écran se rafraîchir avant le calcul
+      const F = Harmo.fit(t, h);
+      harm = { fittedAt: Date.now(), F }; P = Harmo.predictor(F); dayCache = {};
+      save(HKEY, harm); tideState = "ok"; render(); return;
     } catch (e) { /* réseau indisponible : essai suivant */ }
   }
-  tideState = "error"; render();
+  tideState = harm ? "ok" : "error"; render();
 }
-function coversDay(d) {
-  if (!tide || !tide.series.length) return false;
-  const a = dayStart(d), s = tide.series;
-  return s[0][0] <= a && s[s.length - 1][0] >= a + 1440;
+/* niveau prédit (par rapport au niveau moyen) pour un jour local, échantillonné toutes les 5 min de -60 à +1500 min */
+let dayCache = {};
+function mslDay(d) {
+  if (!P) return null;
+  if (dayCache[d]) return dayCache[d];
+  const [y, mo, da] = d.split("-").map(Number), t0 = new Date(y, mo - 1, da, 0, 0, 0).getTime();
+  const arr = new Float64Array(313);
+  for (let i = 0; i < 313; i++) arr[i] = P(t0 + (i * 5 - 60) * 60000);
+  const keys = Object.keys(dayCache); if (keys.length > 40) delete dayCache[keys[0]];
+  return (dayCache[d] = arr);
 }
-function autoAt(t) { const v = mslAt(t); return isNaN(v) ? v : v * (S.scale || 1) + S.nm; }
-function mslAt(t) { // t en minutes "locales absolues" ; niveau par rapport au niveau moyen
-  const s = tide.series; if (t < s[0][0] || t > s[s.length - 1][0]) return NaN;
-  let lo = 0, hi = s.length - 1;
-  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (s[mid][0] <= t) lo = mid; else hi = mid; }
-  const p1 = s[lo], p2 = s[hi]; if (p2[0] === p1[0]) return p1[1];
-  const f = (t - p1[0]) / (p2[0] - p1[0]);
-  if (tide.step <= 15) return p1[1] + (p2[1] - p1[1]) * f;
-  const p0 = s[lo - 1] || p1, p3 = s[hi + 1] || p2; // Catmull-Rom pour les données horaires
-  const f2 = f * f, f3 = f2 * f;
-  return 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * f + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * f2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * f3);
-}
+function mslAtDay(arr, m) { const x = (m + 60) / 5, i = Math.max(0, Math.min(311, Math.floor(x))), f = x - i; return arr[i] + (arr[i + 1] - arr[i]) * f; }
 
 /* ---------- marée saisie (SHOM) ---------- */
 function manualModel(d) {
@@ -97,8 +96,9 @@ function manualModel(d) {
 function model(d) {
   const man = manualModel(d);
   if (man) return { src: "shom", fn: man.fn, raw: man.raw, extrapFrom: man.raw[0].m, extrapTo: man.raw[man.raw.length - 1].m };
-  if (tide && coversDay(d)) {
-    const a = dayStart(d), fn = m => autoAt(a + m), raw = [];
+  const arr = mslDay(d);
+  if (arr) {
+    const k = S.scale || 1, z = S.nm, fn = m => mslAtDay(arr, m) * k + z, raw = [];
     let prev = fn(-15), c = fn(0);
     for (let m = 0; m <= 1440; m += 5) { const n = fn(m + 5); if (c >= prev && c > n) raw.push({ m, h: c, k: "PM" }); if (c <= prev && c < n) raw.push({ m, h: c, k: "BM" }); prev = c; c = n; }
     return { src: "auto", fn, raw, extrapFrom: 0, extrapTo: 1440 };
@@ -107,8 +107,8 @@ function model(d) {
 }
 /* compare le modèle aux PM/BM saisies : écart maximal et réglage (amplitude + niveau moyen) qui l'annule au mieux */
 function calibration(d) {
-  const man = manualModel(d); if (!man || !tide || !coversDay(d)) return null;
-  const a = dayStart(d), pts = man.raw.map(e => [mslAt(a + e.m), e.h]).filter(q => isFinite(q[0]));
+  const man = manualModel(d), arr = mslDay(d); if (!man || !arr) return null;
+  const pts = man.raw.map(e => [mslAtDay(arr, e.m), e.h]).filter(q => isFinite(q[0]));
   if (!pts.length) return null;
   let err = 0; for (const [x, y] of pts) err = Math.max(err, Math.abs(y - (x * (S.scale || 1) + S.nm)));
   const n = pts.length, mx = pts.reduce((t, q) => t + q[0], 0) / n, my = pts.reduce((t, q) => t + q[1], 0) / n;
@@ -144,7 +144,13 @@ map.attributionControl.setPosition("topright");
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
 const seamark = L.tileLayer("https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenSeaMap" });
 const depthLayer = L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", { layers: "emodnet:mean_atlas_land", format: "image/png", transparent: true, opacity: 0.55, attribution: "EMODnet Bathymétrie" });
+let shomLayer = null;
+const shomUrl = key => "https://services.data.shom.fr/" + encodeURIComponent(key) + "/wmts?layer=RASTER_MARINE_3857_WMTS&style=normal&tilematrixset=3857&Service=WMTS&Request=GetTile&Version=1.0.0&Format=image%2Fpng&TileMatrix={z}&TileCol={x}&TileRow={y}";
+let shomWarned = false;
+function shomError() { if (!shomWarned) { shomWarned = true; toast("Carte Shom refusée : vérifie ta clé d'accès"); } }
 function applyLayers() {
+  if (shomLayer) { map.removeLayer(shomLayer); shomLayer = null; }
+  if (S.layers.shom && S.shomKey) { shomLayer = L.tileLayer(shomUrl(S.shomKey), { maxZoom: 18, attribution: "© Shom" }); shomLayer.on("tileerror", shomError); shomLayer.addTo(map); }
   S.layers.seamark ? seamark.addTo(map) : map.removeLayer(seamark);
   S.layers.depth ? depthLayer.addTo(map) : map.removeLayer(depthLayer);
 }
@@ -277,16 +283,17 @@ function render() {
   } else { $("#hNow").textContent = "–"; $("#trend").textContent = ""; }
   const tag = $("#srcTag");
   if (M && M.src === "shom") tag.textContent = "SHOM saisi";
-  else if (M) tag.textContent = "Modèle auto · " + ZONE.port;
-  else tag.textContent = tideState === "loading" ? "Chargement marée…" : "Pas de marée";
+  else if (M) tag.textContent = "Prédiction · " + ZONE.port;
+  else tag.textContent = tideState === "loading" ? "Calcul de la marée…" : "Pas de marée";
   // bandeau
   let b = "";
   const cal = calibration(day);
-  if (!M && tideState === "error") b = '<div class="banner">Marée automatique indisponible (pas de réseau ?). Saisis les PM/BM du SHOM pour ce jour.</div>';
-  else if (!M && tideState !== "loading") b = '<div class="banner">Pas de prédiction pour ce jour. Le modèle couvre environ 8 jours ; au-delà, saisis les PM/BM du SHOM.</div>';
+  if (!M && tideState === "loading") b = '<div class="banner">Première analyse de la marée en cours (une année de données à télécharger)…</div>';
+  else if (!M) b = '<div class="banner">Marée automatique indisponible (pas de réseau ?). Saisis les PM/BM du SHOM pour ce jour, ou réessaie plus tard.</div>';
+  else if (cal !== null && cal.err >= 0.08 && Math.abs(cal.nm - S.nm) < 0.02 && Math.abs(cal.scale - (S.scale || 1)) < 0.01) b = '<div class="banner">Le modèle reste à ' + fmt(cal.err, 2) + ' m des PM/BM SHOM saisies (décalage d\'heure). Pour ce jour, ce sont tes PM/BM SHOM qui sont utilisées.</div>';
   else if (cal !== null && cal.err >= 0.08) b = '<div class="banner">Le modèle s\'écarte jusqu\'à <b>' + fmt(cal.err, 2) + ' m</b> des PM/BM SHOM saisies. <button class="link" id="recal">Recaler le modèle</button></div>';
   $("#tideBanner").innerHTML = b;
-  const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = cal.nm; S.scale = cal.scale; persist(); render(); toast("Modèle recalé sur le SHOM"); };
+  const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = cal.nm; S.scale = cal.scale; dayCache = {}; persist(); render(); toast("Modèle recalé sur le SHOM"); };
   drawCurve(M); drawCards(M); drawMarkers(M); renderProbe();
 }
 
@@ -371,6 +378,8 @@ $("#handle").onclick = () => openDrawer($("#drawer").classList.contains("closed"
 $("#slider").addEventListener("input", e => { cur = +e.target.value; render(); });
 $("#nowBtn").onclick = () => { day = todayStr(); cur = nowMin(); render(); };
 $("#day").addEventListener("change", e => { if (e.target.value) { day = e.target.value; render(); } });
+const shiftDay = n => { const [y, m, d] = day.split("-").map(Number), x = new Date(y, m - 1, d + n); day = x.getFullYear() + "-" + pad(x.getMonth() + 1) + "-" + pad(x.getDate()); render(); };
+$("#prevDay").onclick = () => shiftDay(-1); $("#nextDay").onclick = () => shiftDay(1);
 $("#addBtn2").onclick = () => { openDrawer(false); toast("Touche la carte à l'endroit du passage"); };
 $("#tideBtn").onclick = tideSheet;
 $("#settings").onclick = settingsSheet;
@@ -485,10 +494,12 @@ function layersSheet() {
   openSheet('<h2>Couches de la carte</h2>' +
     '<label class="f" style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="lSea"' + (S.layers.seamark ? " checked" : "") + ' style="width:22px;height:22px"> Balisage OpenSeaMap <span class="h">bouées, feux, épaves, roches</span></label>' +
     '<label class="f" style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="lDep"' + (S.layers.depth ? " checked" : "") + ' style="width:22px;height:22px"> Teinte des profondeurs EMODnet <span class="h">plus foncé = plus profond</span></label>' +
+    '<label class="f" style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="lShom"' + (S.layers.shom ? " checked" : "") + (S.shomKey ? "" : " disabled") + ' style="width:22px;height:22px"> Carte marine Shom <span class="h">' + (S.shomKey ? "avec ta clé d\'accès Shom" : "nécessite une clé d\'accès Shom, à saisir dans ⚙ Réglages") + '</span></label>' +
     '<p class="note">Le fond OpenStreetMap n\'est pas une carte marine officielle : garde ta carte SHOM pour la navigation.</p>' +
     '<button class="btn primary" id="lOk">Fermer</button>', () => {
       $("#lSea").onchange = e => { S.layers.seamark = e.target.checked; applyLayers(); persist(); };
       $("#lDep").onchange = e => { S.layers.depth = e.target.checked; applyLayers(); persist(); };
+      $("#lShom").onchange = e => { S.layers.shom = e.target.checked; shomWarned = false; applyLayers(); persist(); };
       $("#lOk").onclick = closeSheet;
     });
 }
@@ -501,6 +512,8 @@ function settingsSheet() {
     '<p class="note">Tirant d\'eau : fiche constructeur, ou mesure du point le plus bas (quille, embase moteur baissée) sous la flottaison, bateau chargé. Pied de pilote : 0,3 m sur sable par mer calme, 0,5 à 1 m sur roches ou avec houle.</p>' +
     '<label class="f">Niveau moyen à ' + ZONE.port + ' (m) <span class="h">Hauteur du niveau moyen au-dessus du zéro des cartes. Valeur de référence 5,25 m ; se règle tout seul avec « Recaler le modèle ».</span><input class="in num" id="bNm" inputmode="decimal" value="' + fmt(S.nm, 2) + '"></label>' +
     '<p class="note">Amplitude du modèle : ×' + fmt(S.scale || 1, 2) + '. <button class="link" id="calReset">Revenir aux valeurs d\'origine</button></p>' +
+    '<p class="note">' + (harm ? "Prédiction calculée sur " + harm.F.days + " jours de données (" + harm.F.cons.length + " composantes, écart résiduel " + Math.round(harm.F.rms * 100) + " cm), mise à jour le " + new Date(harm.fittedAt).toLocaleDateString("fr-FR") + "." : "Prédiction pas encore calculée.") + '</p>' +
+    '<label class="f">Clé d\'accès Shom <span class="h">Facultatif. Pour afficher les cartes marines raster du Shom, il faut une clé délivrée par le Shom pour ce site.</span><input class="in" id="bShom" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(S.shomKey || "") + '"></label>' +
     '<div class="err" id="bErr" hidden></div>' +
     '<div class="actions"><button class="btn ghost" id="bCancel">Annuler</button><button class="btn primary" id="bSave">Enregistrer</button></div>' +
     '<hr style="border:0;border-top:1px solid var(--line);width:100%">' +
@@ -511,7 +524,8 @@ function settingsSheet() {
     $("#bSave").onclick = () => {
       const d = num($("#bDraft").value), k = num($("#bKeel").value), nm = num($("#bNm").value);
       if (!(d > 0 && d < 10) || !(k >= 0 && k < 5) || !(nm > 0 && nm < 10)) { $("#bErr").textContent = "Vérifie les valeurs, en mètres (ex. 0,9 et 0,5)."; $("#bErr").hidden = false; return; }
-      S.boat = { name: $("#bName").value.trim() || "Mon bateau", draft: d, keel: k }; S.nm = nm; persist(); closeSheet(); render(); toast("Réglages enregistrés");
+      S.boat = { name: $("#bName").value.trim() || "Mon bateau", draft: d, keel: k }; S.nm = nm;
+      const key = $("#bShom").value.trim(); if (key !== (S.shomKey || "")) { S.shomKey = key; S.layers.shom = !!key; shomWarned = false; applyLayers(); } persist(); closeSheet(); render(); toast("Réglages enregistrés");
     };
     $("#calReset").onclick = () => { S.nm = ZONE.nm; S.scale = 1; persist(); closeSheet(); render(); toast("Valeurs d'origine rétablies"); };
     $("#reTide").onclick = () => { closeSheet(); fetchTide(true); };
