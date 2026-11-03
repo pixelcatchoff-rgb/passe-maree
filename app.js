@@ -8,10 +8,11 @@ const ZONE = {
   tideLat: 48.73, tideLon: -3.98,   // point en mer devant Roscoff pour le modèle de marée
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
   // recalage intégré pour tous : niveau moyen, amplitude et décalage horaire du modèle par rapport au SHOM
-  cal: { nm: 5.25, scale: 1, shift: 0 },
+  // valeurs calculées le 03/11/2026 sur 7 jours de PM/BM SHOM (coef. 47 à 84)
+  cal: { nm: 5.683, scale: 1.0507, shift: 41 },
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.7.0";
+const VERSION = "1.8.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -42,6 +43,8 @@ if ("nm" in S || "scale" in S || "shift" in S) {
   delete S.nm; delete S.scale; delete S.shift;
 }
 const C = () => S.cal || ZONE.cal;
+// un réglage personnel identique au réglage intégré n'a plus lieu d'être
+if (S.cal && Math.abs(S.cal.nm - ZONE.cal.nm) < 0.005 && Math.abs(S.cal.scale - ZONE.cal.scale) < 0.0005 && S.cal.shift === ZONE.cal.shift) S.cal = null;
 const persist = () => save(KEY, S);
 
 let day = todayStr(), cur = nowMin(), selId = S.points[0] && S.points[0].id;
