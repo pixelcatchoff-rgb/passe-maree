@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Passe-Marée</title>
+<meta name="theme-color" content="#0d5c7d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Passe-Marée">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<style>
+:root{
+  --bg:#e9f0f2;--surface:#ffffff;--sunk:#dbe6ea;--ink:#10283a;--muted:#58707e;--line:#c3d3da;
+  --accent:#0d5c7d;--accent-ink:#ffffff;--water:#9cc6d8;
+  --go:#1d7f47;--go-bg:#d9f0e2;--warn:#a5650b;--warn-bg:#f8e9cc;--nogo:#b5372a;--nogo-bg:#f7dcd8;
+  --font:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --sat:env(safe-area-inset-top,0px);--sab:env(safe-area-inset-bottom,0px);--sal:env(safe-area-inset-left,0px);--sar:env(safe-area-inset-right,0px);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0c1820;--surface:#13232d;--sunk:#0f1e27;--ink:#e3eef2;--muted:#8fa6b2;--line:#25404e;
+  --accent:#5fb6da;--accent-ink:#06202b;--water:#1f5b74;
+  --go:#5fd08f;--go-bg:#123522;--warn:#efb54f;--warn-bg:#3a2b10;--nogo:#ff8a7a;--nogo-bg:#3d1914;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:16px;line-height:1.4;-webkit-text-size-adjust:100%;overflow:hidden}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.num{font-variant-numeric:tabular-nums}
+
+#map{position:fixed;inset:0;z-index:0;background:#aad3df}
+.leaflet-container{font:inherit}
+.leaflet-control-attribution{font-size:10px}
+
+/* top floating bar */
+.top{position:fixed;z-index:500;top:calc(8px + var(--sat));left:calc(8px + var(--sal));right:calc(8px + var(--sar));display:flex;gap:8px;align-items:center;pointer-events:none}
+.top>*{pointer-events:auto}
+.pillbox{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.18)}
+.brand{padding:8px 12px;font-weight:800;font-size:16px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand small{display:block;font-weight:500;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+.ibtn{width:46px;height:46px;display:grid;place-items:center;font-size:20px;border-radius:12px;background:var(--surface);border:1px solid var(--line);box-shadow:0 2px 10px rgba(0,0,0,.18)}
+.ibtn.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.side{position:fixed;z-index:500;right:calc(8px + var(--sar));top:calc(70px + var(--sat));display:flex;flex-direction:column;gap:8px}
+.hint-tap{position:fixed;z-index:500;left:50%;transform:translateX(-50%);top:calc(70px + var(--sat));background:var(--ink);color:var(--bg);padding:6px 12px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap}
+
+/* drawer */
+.drawer{position:fixed;z-index:600;left:0;right:0;bottom:0;background:var(--surface);border-radius:18px 18px 0 0;box-shadow:0 -6px 24px rgba(0,0,0,.25);
+  padding:6px calc(14px + var(--sar)) calc(10px + var(--sab)) calc(14px + var(--sal));display:flex;flex-direction:column;gap:10px;max-height:calc(100% - 70px - var(--sat));transition:max-height .2s}
+.drawer.closed .more{display:none}
+.handle{align-self:center;width:44px;height:5px;border-radius:3px;background:var(--line);border:0;padding:0;margin:4px 0}
+.handlebtn{border:0;background:none;padding:2px 30px;align-self:center}
+.timerow{display:flex;align-items:center;gap:8px}
+.clock{font-weight:800;font-size:26px;min-width:76px}
+input[type=range]{flex:1;min-width:0;accent-color:var(--accent);height:32px}
+input[type=date]{background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:6px;font-size:14px;min-height:38px;max-width:150px}
+.chip{border:1px solid var(--line);background:var(--sunk);border-radius:999px;padding:6px 10px;font-size:13px;font-weight:700;white-space:nowrap;min-height:36px}
+.chip.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.summary{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--muted);flex-wrap:wrap}
+.summary b{color:var(--ink);font-size:17px}
+.src{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--sunk);border:1px solid var(--line)}
+.more{overflow:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:12px;padding-bottom:4px}
+.curve svg{display:block;width:100%;height:auto;touch-action:none}
+.sec{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.sec h2{font-size:17px;margin:0}
+.link{background:none;border:0;color:var(--accent);font-weight:700;padding:6px 0;font-size:14px}
+.cards{display:flex;flex-direction:column;gap:8px}
+.card{border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.card.sel{box-shadow:0 0 0 2px var(--accent) inset;border-color:var(--accent)}
+.card-top{display:flex;gap:8px;align-items:flex-start}
+.card-top .t{flex:1;min-width:0}
+.card h3{margin:0;font-size:16px;overflow-wrap:anywhere}
+.meta{font-size:12.5px;color:var(--muted)}
+.pill{flex:none;border-radius:999px;padding:3px 9px;font-weight:800;font-size:12.5px;white-space:nowrap}
+.pill.go{background:var(--go-bg);color:var(--go)}.pill.warn{background:var(--warn-bg);color:var(--warn)}.pill.nogo{background:var(--nogo-bg);color:var(--nogo)}
+.track{position:relative;height:12px;background:var(--nogo-bg);border-radius:4px;overflow:hidden}
+.track span{position:absolute;top:0;bottom:0;background:var(--go)}
+.track b{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ink)}
+.wins{font-size:14px}.wins strong{font-size:15px}
+.row-actions{display:flex;gap:8px;justify-content:flex-end}
+.btn{border:0;border-radius:10px;padding:10px 14px;font-weight:800;min-height:44px}
+.btn.primary{background:var(--accent);color:var(--accent-ink)}
+.btn.ghost{background:var(--sunk);border:1px solid var(--line)}
+.btn.danger{background:var(--nogo-bg);color:var(--nogo);border:1px solid var(--nogo)}
+.small{font-size:13px;padding:6px 10px;min-height:34px}
+.empty{border:1px dashed var(--line);border-radius:12px;padding:12px;color:var(--muted);font-size:14px}
+.note{font-size:12.5px;color:var(--muted);margin:0}
+.banner{border-radius:10px;padding:8px 10px;font-size:13px;background:var(--warn-bg);border:1px solid var(--warn)}
+
+/* sheet */
+.scrim{position:fixed;inset:0;background:rgba(5,15,22,.45);z-index:900}
+.sheet{position:fixed;z-index:901;left:0;right:0;bottom:0;max-width:560px;margin:0 auto;background:var(--surface);border-radius:18px 18px 0 0;max-height:90%;overflow:auto;
+  padding:12px calc(16px + var(--sar)) calc(16px + var(--sab)) calc(16px + var(--sal));display:flex;flex-direction:column;gap:12px}
+.sheet h2{margin:0;font-size:20px}
+label.f{display:flex;flex-direction:column;gap:4px;font-weight:700;font-size:14px}
+label.f .h{font-weight:400;color:var(--muted);font-size:12.5px}
+.in{background:var(--sunk);border:1px solid var(--line);border-radius:9px;padding:10px;font-size:16px;min-height:44px;width:100%;min-width:0}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.seg{display:flex;background:var(--sunk);border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px}
+.seg button{flex:1;border:0;background:none;border-radius:8px;padding:8px;font-weight:700;min-height:40px;font-size:14px}
+.seg button.on{background:var(--surface);box-shadow:0 1px 3px rgba(0,0,0,.15);color:var(--accent)}
+.tiderow{display:grid;grid-template-columns:72px 1fr 1fr 40px;gap:6px}
+.x{border:0;background:var(--sunk);border-radius:8px;height:44px;font-size:20px;color:var(--muted)}
+.actions{display:flex;gap:10px;flex-wrap:wrap}.actions .btn{flex:1}
+.err{color:var(--nogo);font-weight:700;font-size:14px}
+.depthbox{background:var(--sunk);border-radius:10px;padding:10px;font-size:14px}
+.depthbox b{font-size:18px}
+.toast{position:fixed;z-index:1000;left:50%;transform:translateX(-50%);bottom:calc(90px + var(--sab));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-weight:700;font-size:14px}
+.pm-marker{width:22px;height:22px;border-radius:50%;border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+.pm-marker.sel{width:28px;height:28px;border-width:4px}
+.leaflet-tooltip.pm-label{background:var(--surface);color:var(--ink);border:1px solid var(--line);font-weight:700;font-size:12px;padding:2px 6px;box-shadow:none}
+@media (prefers-reduced-motion:reduce){.drawer{transition:none}}
+</style>
+</head>
+<body>
+<div id="map" aria-label="Carte marine"></div>
+
+<div class="top">
+  <div class="pillbox brand" id="brand">Passe-Marée<small id="boatLine">—</small></div>
+  <button class="ibtn" id="addMode" aria-label="Placer un point" title="Placer un point">＋</button>
+</div>
+<div class="side">
+  <button class="ibtn" id="locate" aria-label="Ma position" title="Ma position">◎</button>
+  <button class="ibtn" id="layers" aria-label="Couches de la carte" title="Couches">▤</button>
+  <button class="ibtn" id="settings" aria-label="Réglages" title="Réglages">⚙</button>
+</div>
+<div class="hint-tap" id="tapHint" hidden>Touche la carte à l'endroit du passage</div>
+
+<section class="drawer closed" id="drawer">
+  <button class="handlebtn" id="handle" aria-label="Afficher ou masquer le détail"><span class="handle" style="display:block"></span></button>
+  <div class="timerow">
+    <div class="clock num" id="clock">--h--</div>
+    <input type="range" id="slider" min="0" max="1439" step="5" aria-label="Heure de passage">
+    <button class="chip" id="nowBtn">Maintenant</button>
+  </div>
+  <div class="summary"><span>Marée <b class="num" id="hNow">–</b></span><span id="trend"></span><span class="src" id="srcTag">…</span></div>
+  <div class="more">
+    <div class="sec"><input type="date" id="day" aria-label="Date"><button class="link" id="tideBtn">Saisir les marées SHOM</button></div>
+    <div id="tideBanner"></div>
+    <div class="curve"><svg id="svg" viewBox="0 0 360 180" role="img" aria-label="Courbe de marée"></svg></div>
+    <div class="sec"><h2>Mes passages</h2><button class="link" id="addBtn2">+ Placer un point</button></div>
+    <div class="cards" id="cards"></div>
+    <p class="note">Hauteur d'eau = sonde + marée. Ça passe si elle dépasse tirant d'eau + pied de pilote. Aide au calcul, pas un instrument de navigation : houle, pression et vent décalent le niveau réel.</p>
+  </div>
+</section>
+
+<div id="layer"></div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

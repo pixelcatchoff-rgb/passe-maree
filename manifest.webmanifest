@@ -1,0 +1,17 @@
+{
+  "name": "Passe-Marée",
+  "short_name": "Passe-Marée",
+  "description": "Savoir quand ton bateau passe sur un point, selon la marée.",
+  "lang": "fr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#e9f0f2",
+  "theme_color": "#0d5c7d",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
