@@ -1,8 +1,8 @@
 /* Passe-Marée — fonctionnement hors ligne */
-const SHELL = "pm-shell-1.2.0";
+const SHELL = "pm-shell-1.3.0";
 const TILES = "pm-tiles-1";
 const MAX_TILES = 3000;
-const FILES = ["./", "index.html", "app.js", "manifest.webmanifest", "vendor/leaflet.js", "vendor/leaflet.css",
+const FILES = ["./", "index.html", "app.js?v=1.3.0", "manifest.webmanifest", "vendor/leaflet.js", "vendor/leaflet.css",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {
@@ -37,7 +37,7 @@ self.addEventListener("fetch", e => {
 
   // Fichiers de l'appli : réseau d'abord (mises à jour), cache si hors ligne
   if (url.origin === self.location.origin) {
-    e.respondWith(fetch(e.request).then(r => {
+    e.respondWith(fetch(e.request, { cache: "no-store" }).then(r => {
       if (r.ok) { const cp = r.clone(); caches.open(SHELL).then(c => c.put(e.request, cp)); }
       return r;
     }).catch(() => caches.match(e.request).then(h => h || caches.match("index.html"))));

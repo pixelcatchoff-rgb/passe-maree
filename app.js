@@ -9,7 +9,7 @@ const ZONE = {
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -176,7 +176,6 @@ function renderProbe() {
   const el = $("#probe");
   if (!probe || !$("#drawer").classList.contains("closed")) { el.hidden = true; return; }
   el.hidden = false;
-  el.style.bottom = ($("#drawer").offsetHeight + 8) + "px";
   const M = model(day);
   let body = "";
   if (probe.state === "loading") body = '<div class="meta">Recherche de la sonde…</div>';
@@ -195,16 +194,30 @@ function renderProbe() {
       '<div class="wins">' + wt + "</div>" + tr +
       '<div class="actions"><button class="btn ghost small" id="pbFix">Corriger la sonde</button><button class="btn primary small" id="pbSave">Enregistrer</button></div>';
   }
-  el.innerHTML = '<div class="probe-head"><div><b>Point consulté</b> <span class="meta num">' + dms(probe.lat, "N", "S") + " · " + dms(probe.lon, "E", "W") + " · à " + hm(cur) + '</span></div><button class="x" id="pbClose" aria-label="Fermer">×</button></div>' + body;
-  const cb = $("#pbClose");
-  cb.addEventListener("touchend", e => { e.preventDefault(); e.stopPropagation(); closeProbe(); });
-  cb.onclick = e => { e.stopPropagation(); closeProbe(); };
-  const ll = { lat: probe.lat, lng: probe.lon };
-  const r = $("#pbRetry"); if (r) r.onclick = () => showProbe(ll);
-  const m = $("#pbManual"); if (m) m.onclick = () => pointSheet(null, ll, null);
-  const f = $("#pbFix"); if (f) f.onclick = () => pointSheet(null, ll, probe);
-  const sv = $("#pbSave"); if (sv) sv.onclick = () => pointSheet(null, ll, probe);
+  $("#pbWhere").textContent = dms(probe.lat, "N", "S") + " · " + dms(probe.lon, "E", "W") + " · à " + hm(cur);
+  $("#pbBody").innerHTML = body;
 }
+/* un seul écouteur, posé une fois : les boutons de la fiche marchent même quand son contenu est redessiné */
+(function () {
+  const el = $("#probe");
+  let handled = 0;
+  const act = e => {
+    const t = e.target.closest("button"); if (!t || !probe) return;
+    if (e.type === "touchend") { e.preventDefault(); handled = Date.now(); } else if (Date.now() - handled < 700) return;
+    e.stopPropagation();
+    const ll = { lat: probe.lat, lng: probe.lon };
+    if (t.id === "pbClose") closeProbe();
+    else if (t.id === "pbRetry") showProbe(ll);
+    else if (t.id === "pbManual") pointSheet(null, ll, null);
+    else if (t.id === "pbFix" || t.id === "pbSave") pointSheet(null, ll, probe);
+  };
+  el.addEventListener("touchend", act, { passive: false });
+  el.addEventListener("click", act);
+  // glisser la fiche vers le bas la ferme aussi
+  let y0 = null;
+  el.addEventListener("touchstart", e => { y0 = e.target.closest("button") ? null : e.touches[0].clientY; }, { passive: true });
+  el.addEventListener("touchmove", e => { if (y0 !== null && e.touches[0].clientY - y0 > 50) { y0 = null; closeProbe(); } }, { passive: true });
+})();
 
 function drawMarkers(M) {
   const seen = {};
@@ -332,7 +345,7 @@ function openDrawer(open) { $("#drawer").classList.toggle("closed", !open); if (
   let y0 = null, dy = 0, active = false;
   dr.addEventListener("touchstart", e => {
     y0 = null; dy = 0; active = false;
-    if (e.target.closest('input[type=range], svg, input, select')) return;
+    if (e.target.closest('input[type=range], svg, input, select, .probe')) return;
     if (e.target.closest(".more") && more.scrollTop > 0) return;
     y0 = e.touches[0].clientY;
   }, { passive: true });
@@ -482,7 +495,7 @@ function layersSheet() {
 
 function settingsSheet() {
   const b = S.boat;
-  openSheet('<h2>Réglages</h2>' +
+  openSheet('<h2>Réglages <span class="meta">v' + VERSION + '</span></h2>' +
     '<label class="f">Nom du bateau<input class="in" id="bName" maxlength="50" value="' + esc(b.name) + '"></label>' +
     '<div class="row2"><label class="f">Tirant d\'eau (m)<input class="in num" id="bDraft" inputmode="decimal" value="' + fmt(b.draft, 2) + '"></label><label class="f">Pied de pilote (m)<input class="in num" id="bKeel" inputmode="decimal" value="' + fmt(b.keel, 2) + '"></label></div>' +
     '<p class="note">Tirant d\'eau : fiche constructeur, ou mesure du point le plus bas (quille, embase moteur baissée) sous la flottaison, bateau chargé. Pied de pilote : 0,3 m sur sable par mer calme, 0,5 à 1 m sur roches ou avec houle.</p>' +
@@ -516,6 +529,15 @@ function settingsSheet() {
 }
 
 let tt; function toast(m) { clearTimeout(tt); let t = $(".toast"); if (!t) { t = document.createElement("div"); t.className = "toast"; t.setAttribute("role", "status"); document.body.appendChild(t); } t.textContent = m; tt = setTimeout(() => t.remove(), 2000); }
+
+/* ---------- erreurs visibles (pour les signaler) ---------- */
+function showError(msg) {
+  let b = $("#errBar");
+  if (!b) { b = document.createElement("div"); b.id = "errBar"; b.className = "errbar"; document.body.appendChild(b); b.onclick = () => b.remove(); }
+  b.textContent = "Erreur v" + VERSION + " : " + msg + " (touche pour fermer)";
+}
+window.addEventListener("error", e => showError((e.message || "inconnue") + (e.lineno ? " l." + e.lineno : "")));
+window.addEventListener("unhandledrejection", e => showError(String(e.reason && e.reason.message || e.reason)));
 
 /* ---------- démarrage ---------- */
 render();
