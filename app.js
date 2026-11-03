@@ -9,7 +9,7 @@ const ZONE = {
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -30,7 +30,7 @@ const dur = m => { m = Math.round(m); return m < 60 ? m + " min" : Math.floor(m 
 const KEY = "passemaree.v1", TKEY = "passemaree.tide.v1";
 function load(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { toast("Mémoire du téléphone pleine"); } }
-const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, nm: ZONE.nm, layers: { seamark: true, depth: false }, view: null };
+const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, nm: ZONE.nm, scale: 1, layers: { seamark: true, depth: false }, view: null };
 let S = Object.assign({}, DEF, load(KEY) || {});
 S.layers = Object.assign({}, DEF.layers, S.layers || {});
 const persist = () => save(KEY, S);
@@ -70,16 +70,17 @@ function coversDay(d) {
   const a = dayStart(d), s = tide.series;
   return s[0][0] <= a && s[s.length - 1][0] >= a + 1440;
 }
-function autoAt(t) { // t en minutes "locales absolues"
+function autoAt(t) { const v = mslAt(t); return isNaN(v) ? v : v * (S.scale || 1) + S.nm; }
+function mslAt(t) { // t en minutes "locales absolues" ; niveau par rapport au niveau moyen
   const s = tide.series; if (t < s[0][0] || t > s[s.length - 1][0]) return NaN;
   let lo = 0, hi = s.length - 1;
   while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (s[mid][0] <= t) lo = mid; else hi = mid; }
-  const p1 = s[lo], p2 = s[hi]; if (p2[0] === p1[0]) return p1[1] + S.nm;
+  const p1 = s[lo], p2 = s[hi]; if (p2[0] === p1[0]) return p1[1];
   const f = (t - p1[0]) / (p2[0] - p1[0]);
-  if (tide.step <= 15) return p1[1] + (p2[1] - p1[1]) * f + S.nm;
+  if (tide.step <= 15) return p1[1] + (p2[1] - p1[1]) * f;
   const p0 = s[lo - 1] || p1, p3 = s[hi + 1] || p2; // Catmull-Rom pour les données horaires
   const f2 = f * f, f3 = f2 * f;
-  return 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * f + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * f2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * f3) + S.nm;
+  return 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * f + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * f2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * f3);
 }
 
 /* ---------- marée saisie (SHOM) ---------- */
@@ -104,11 +105,18 @@ function model(d) {
   }
   return null;
 }
+/* compare le modèle aux PM/BM saisies : écart maximal et réglage (amplitude + niveau moyen) qui l'annule au mieux */
 function calibration(d) {
   const man = manualModel(d); if (!man || !tide || !coversDay(d)) return null;
-  const a = dayStart(d); let s = 0;
-  for (const e of man.raw) s += e.h - autoAt(a + e.m);
-  return s / man.raw.length;
+  const a = dayStart(d), pts = man.raw.map(e => [mslAt(a + e.m), e.h]).filter(q => isFinite(q[0]));
+  if (!pts.length) return null;
+  let err = 0; for (const [x, y] of pts) err = Math.max(err, Math.abs(y - (x * (S.scale || 1) + S.nm)));
+  const n = pts.length, mx = pts.reduce((t, q) => t + q[0], 0) / n, my = pts.reduce((t, q) => t + q[1], 0) / n;
+  let sxx = 0, sxy = 0; for (const [x, y] of pts) { sxx += (x - mx) ** 2; sxy += (x - mx) * (y - my); }
+  let scale = S.scale || 1;
+  const hasBoth = man.raw.some(e => e.k === "PM") && man.raw.some(e => e.k === "BM");
+  if (hasBoth && sxx > 0.5) scale = Math.min(1.6, Math.max(0.6, sxy / sxx));
+  return { err, scale: +scale.toFixed(4), nm: +(my - scale * mx).toFixed(3) };
 }
 
 /* ---------- calcul de passage ---------- */
@@ -132,6 +140,7 @@ function status(M, p) {
 const map = L.map("map", { zoomControl: false, attributionControl: true, tap: true })
   .setView(S.view ? [S.view.lat, S.view.lon] : ZONE.center, S.view ? S.view.z : ZONE.zoom);
 map.attributionControl.setPrefix(false);
+map.attributionControl.setPosition("topright");
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
 const seamark = L.tileLayer("https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenSeaMap" });
 const depthLayer = L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", { layers: "emodnet:mean_atlas_land", format: "image/png", transparent: true, opacity: 0.55, attribution: "EMODnet Bathymétrie" });
@@ -146,7 +155,9 @@ let tempMarker = null, meMarker = null, probe = null, probeMarker = null;
 const markers = {};
 
 /* ---------- consultation d'un point (toucher la carte) ---------- */
-map.on("click", e => showProbe(e.latlng));
+let quietUntil = 0; // iOS : le toucher qui ferme une fiche ne doit pas rouvrir un point sur la carte
+const quiet = () => { quietUntil = Date.now() + 600; };
+map.on("click", e => { if (Date.now() < quietUntil || $(".sheet")) return; showProbe(e.latlng); });
 function showProbe(ll) {
   openDrawer(false);
   const id = uid();
@@ -160,7 +171,7 @@ function showProbe(ll) {
     renderProbe();
   }).catch(() => { if (probe && probe.id === id) { probe.state = "err"; renderProbe(); } });
 }
-function closeProbe() { probe = null; if (probeMarker) { map.removeLayer(probeMarker); probeMarker = null; } renderProbe(); }
+function closeProbe() { quiet(); probe = null; if (probeMarker) { map.removeLayer(probeMarker); probeMarker = null; } renderProbe(); }
 function renderProbe() {
   const el = $("#probe");
   if (!probe || !$("#drawer").classList.contains("closed")) { el.hidden = true; return; }
@@ -185,7 +196,9 @@ function renderProbe() {
       '<div class="actions"><button class="btn ghost small" id="pbFix">Corriger la sonde</button><button class="btn primary small" id="pbSave">Enregistrer</button></div>';
   }
   el.innerHTML = '<div class="probe-head"><div><b>Point consulté</b> <span class="meta num">' + dms(probe.lat, "N", "S") + " · " + dms(probe.lon, "E", "W") + " · à " + hm(cur) + '</span></div><button class="x" id="pbClose" aria-label="Fermer">×</button></div>' + body;
-  $("#pbClose").onclick = closeProbe;
+  const cb = $("#pbClose");
+  cb.addEventListener("touchend", e => { e.preventDefault(); e.stopPropagation(); closeProbe(); });
+  cb.onclick = e => { e.stopPropagation(); closeProbe(); };
   const ll = { lat: probe.lat, lng: probe.lon };
   const r = $("#pbRetry"); if (r) r.onclick = () => showProbe(ll);
   const m = $("#pbManual"); if (m) m.onclick = () => pointSheet(null, ll, null);
@@ -258,9 +271,9 @@ function render() {
   const cal = calibration(day);
   if (!M && tideState === "error") b = '<div class="banner">Marée automatique indisponible (pas de réseau ?). Saisis les PM/BM du SHOM pour ce jour.</div>';
   else if (!M && tideState !== "loading") b = '<div class="banner">Pas de prédiction pour ce jour. Le modèle couvre environ 8 jours ; au-delà, saisis les PM/BM du SHOM.</div>';
-  else if (cal !== null && Math.abs(cal) >= 0.05) b = '<div class="banner">Écart modèle / SHOM ce jour : <b>' + (cal > 0 ? "+" : "") + fmt(cal, 2) + ' m</b>. <button class="link" id="recal">Recaler le modèle</button></div>';
+  else if (cal !== null && cal.err >= 0.08) b = '<div class="banner">Le modèle s\'écarte jusqu\'à <b>' + fmt(cal.err, 2) + ' m</b> des PM/BM SHOM saisies. <button class="link" id="recal">Recaler le modèle</button></div>';
   $("#tideBanner").innerHTML = b;
-  const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = +(S.nm + cal).toFixed(3); persist(); render(); toast("Modèle recalé sur le SHOM"); };
+  const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = cal.nm; S.scale = cal.scale; persist(); render(); toast("Modèle recalé sur le SHOM"); };
   drawCurve(M); drawCards(M); drawMarkers(M); renderProbe();
 }
 
@@ -367,7 +380,7 @@ function openSheet(html, mount) {
   $("#layer").innerHTML = '<div class="scrim" id="scrim"></div><div class="sheet" role="dialog" aria-modal="true">' + html + "</div>";
   $("#scrim").onclick = closeSheet; mount && mount($(".sheet"));
 }
-function closeSheet() { $("#layer").innerHTML = ""; if (tempMarker) { map.removeLayer(tempMarker); tempMarker = null; } }
+function closeSheet() { quiet(); $("#layer").innerHTML = ""; if (tempMarker) { map.removeLayer(tempMarker); tempMarker = null; } }
 
 function pointSheet(p, latlng, preset) {
   const isNew = !p;
@@ -441,7 +454,8 @@ function tideSheet() {
       const er = $("#tErr"), clean = rows.filter(r => r.t || r.h !== "").map(r => ({ k: r.k, t: r.t, h: num(r.h) })).sort((a, b) => toMin(a.t) - toMin(b.t));
       const fail = m => { er.textContent = m; er.hidden = false; };
       if (clean.length < 2) return fail("Il faut au moins une PM et une BM.");
-      if (clean.some(r => !/^\d\d:\d\d$/.test(r.t) || !isFinite(r.h) || r.h < -2 || r.h > 16)) return fail("Chaque ligne doit avoir une heure et une hauteur en mètres.");
+      const bad = clean.find(r => !/^\d\d:\d\d$/.test(r.t) || !isFinite(r.h) || r.h < -2 || r.h > 16);
+      if (bad) return fail(!/^\d\d:\d\d$/.test(bad.t) ? "Il manque l'heure d'une " + bad.k + "." : "Il manque la hauteur (en mètres) de la " + bad.k + " de " + bad.t.replace(":", "h") + ". Complète-la ou retire la ligne avec ×.");
       for (let i = 1; i < clean.length; i++) {
         if (clean[i].k === clean[i - 1].k) return fail("Les PM et BM doivent alterner (ligne de " + clean[i].t.replace(":", "h") + ").");
         if ((clean[i].k === "PM") !== (clean[i].h > clean[i - 1].h)) return fail("Une PM doit être plus haute que la BM voisine (ligne de " + clean[i].t.replace(":", "h") + ").");
@@ -473,6 +487,7 @@ function settingsSheet() {
     '<div class="row2"><label class="f">Tirant d\'eau (m)<input class="in num" id="bDraft" inputmode="decimal" value="' + fmt(b.draft, 2) + '"></label><label class="f">Pied de pilote (m)<input class="in num" id="bKeel" inputmode="decimal" value="' + fmt(b.keel, 2) + '"></label></div>' +
     '<p class="note">Tirant d\'eau : fiche constructeur, ou mesure du point le plus bas (quille, embase moteur baissée) sous la flottaison, bateau chargé. Pied de pilote : 0,3 m sur sable par mer calme, 0,5 à 1 m sur roches ou avec houle.</p>' +
     '<label class="f">Niveau moyen à ' + ZONE.port + ' (m) <span class="h">Hauteur du niveau moyen au-dessus du zéro des cartes. Valeur de référence 5,25 m ; se règle tout seul avec « Recaler le modèle ».</span><input class="in num" id="bNm" inputmode="decimal" value="' + fmt(S.nm, 2) + '"></label>' +
+    '<p class="note">Amplitude du modèle : ×' + fmt(S.scale || 1, 2) + '. <button class="link" id="calReset">Revenir aux valeurs d\'origine</button></p>' +
     '<div class="err" id="bErr" hidden></div>' +
     '<div class="actions"><button class="btn ghost" id="bCancel">Annuler</button><button class="btn primary" id="bSave">Enregistrer</button></div>' +
     '<hr style="border:0;border-top:1px solid var(--line);width:100%">' +
@@ -485,6 +500,7 @@ function settingsSheet() {
       if (!(d > 0 && d < 10) || !(k >= 0 && k < 5) || !(nm > 0 && nm < 10)) { $("#bErr").textContent = "Vérifie les valeurs, en mètres (ex. 0,9 et 0,5)."; $("#bErr").hidden = false; return; }
       S.boat = { name: $("#bName").value.trim() || "Mon bateau", draft: d, keel: k }; S.nm = nm; persist(); closeSheet(); render(); toast("Réglages enregistrés");
     };
+    $("#calReset").onclick = () => { S.nm = ZONE.nm; S.scale = 1; persist(); closeSheet(); render(); toast("Valeurs d'origine rétablies"); };
     $("#reTide").onclick = () => { closeSheet(); fetchTide(true); };
     $("#exp").onclick = () => {
       const blob = new Blob([JSON.stringify(S, null, 1)], { type: "application/json" });
@@ -506,6 +522,7 @@ render();
 fetchTide(false);
 if (!S.points.length) openDrawer(true);
 setInterval(() => { if ($("#nowBtn").classList.contains("on") && !$(".sheet")) { cur = nowMin(); render(); } }, 60000);
+window.addEventListener("resize", () => renderProbe());
 document.addEventListener("visibilitychange", () => { if (!document.hidden) fetchTide(false); });
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 })();

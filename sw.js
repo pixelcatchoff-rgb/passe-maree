@@ -1,5 +1,5 @@
 /* Passe-Marée — fonctionnement hors ligne */
-const SHELL = "pm-shell-1.1.0";
+const SHELL = "pm-shell-1.2.0";
 const TILES = "pm-tiles-1";
 const MAX_TILES = 3000;
 const FILES = ["./", "index.html", "app.js", "manifest.webmanifest", "vendor/leaflet.js", "vendor/leaflet.css",
