@@ -1,0 +1,36 @@
+name: Isobathes EMODnet
+# Calcule les lignes de profondeur du Finistère Nord à partir de la grille EMODnet Bathymétrie
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/isobathes.yml"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Outils
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gdal-bin
+      - name: Grille EMODnet (WCS)
+        run: |
+          set -x
+          URL="https://ows.emodnet-bathymetry.eu/wcs?service=WCS&version=2.0.1&request=GetCoverage&CoverageId=emodnet__mean&format=image/tiff&subset=Long(-4.85,-3.35)&subset=Lat(48.40,48.95)"
+          curl -sS -L -o dtm.tif "$URL" || true
+          file dtm.tif; ls -la dtm.tif
+          gdalinfo -stats dtm.tif | head -40 || (head -c 600 dtm.tif; exit 1)
+      - name: Isobathes
+        run: |
+          # altitudes EMODnet : négatives sous le zéro hydrographique (≈ PBMA)
+          gdal_contour -a alt -fl 0 -2 -5 -10 -20 -50 dtm.tif contours.shp
+          ogr2ogr -f GeoJSON -lco COORDINATE_PRECISION=5 -simplify 0.00015 data/isobathes.geojson contours.shp
+          ls -la data/isobathes.geojson
+          python3 -c "import json;d=json.load(open('data/isobathes.geojson'));from collections import Counter;print(len(d['features']),Counter(f['properties']['alt'] for f in d['features']))"
+      - name: Enregistrer
+        run: |
+          git config user.name "isobathes-bot"
+          git config user.email "isobathes-bot@users.noreply.github.com"
+          git add data/isobathes.geojson
+          git commit -m "Isobathes EMODnet recalculées" || echo "rien de neuf"
+          git push
