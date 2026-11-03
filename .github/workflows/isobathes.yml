@@ -23,6 +23,7 @@ jobs:
       - name: Isobathes
         run: |
           # altitudes EMODnet : négatives sous le zéro hydrographique (≈ PBMA)
+          mkdir -p data
           gdal_contour -a alt -fl -50 -20 -10 -5 -2 0 dtm.tif contours.shp
           ogr2ogr -f GeoJSON -lco COORDINATE_PRECISION=5 -simplify 0.00015 data/isobathes.geojson contours.shp
           ls -la data/isobathes.geojson
