@@ -12,7 +12,7 @@ const ZONE = {
   cal: { nm: 5.683, scale: 1.0507, shift: 41 },
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.8.0";
+const VERSION = "1.9.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -33,7 +33,7 @@ const dur = m => { m = Math.round(m); return m < 60 ? m + " min" : Math.floor(m 
 const KEY = "passemaree.v1", HKEY = "passemaree.harm.v1";
 function load(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { toast("Mémoire du téléphone pleine"); } }
-const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, cal: null, layers: { seamark: true, depth: false }, view: null };
+const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, cal: null, layers: { seamark: true, depth: false, iso: true }, view: null };
 let S = Object.assign({}, DEF, load(KEY) || {});
 S.layers = Object.assign({}, DEF.layers, S.layers || {});
 // anciennes versions : réglage stocké à plat ; on ne le garde que s'il a été modifié par l'utilisateur
@@ -181,11 +181,44 @@ map.attributionControl.setPosition("topright");
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
 const seamark = L.tileLayer("https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenSeaMap" });
 const depthLayer = L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", { layers: "emodnet:mean_atlas_land", format: "image/png", transparent: true, opacity: 0.55, attribution: "EMODnet Bathymétrie" });
+/* isobathes calculées d'après la grille EMODnet (fichier data/isobathes.geojson, généré sur GitHub) */
+let isoLayer = null, isoLabels = L.layerGroup(), isoData = null, isoLbl = [];
+const ISO = { 0: ["#2f7d32", 1.6, "5 4"], 2: ["#1565c0", 1.8, ""], 5: ["#1e88e5", 1.4, ""], 10: ["#42a5f5", 1.1, ""], 20: ["#64b5f6", 0.9, ""], 50: ["#90caf9", 0.8, ""] };
+async function loadIso() {
+  if (isoData) return isoData;
+  const r = await fetch("data/isobathes.geojson?v=1"); if (!r.ok) throw new Error("isobathes " + r.status);
+  isoData = await r.json();
+  for (const f of isoData.features) {
+    const g = f.geometry, lines = g.type === "MultiLineString" ? g.coordinates : [g.coordinates];
+    for (const l of lines) if (l.length >= 6) for (let i = Math.min(5, l.length >> 1); i < l.length; i += 18) isoLbl.push([l[i][1], l[i][0], Math.abs(f.properties.alt)]);
+  }
+  return isoData;
+}
+function updateIsoLabels() {
+  isoLabels.clearLayers();
+  if (!isoLayer || !map.hasLayer(isoLayer) || map.getZoom() < 13) return;
+  const b = map.getBounds(), taken = new Set(); let n = 0;
+  for (const [la, lo, d] of isoLbl) {
+    if (!b.contains([la, lo])) continue;
+    const pt = map.latLngToContainerPoint([la, lo]), cell = Math.floor(pt.x / 70) + ":" + Math.floor(pt.y / 70);
+    if (taken.has(cell)) continue; taken.add(cell);
+    L.marker([la, lo], { interactive: false, keyboard: false, icon: L.divIcon({ className: "iso-lbl", html: d === 0 ? "0" : String(d), iconSize: [22, 14], iconAnchor: [11, 7] }) }).addTo(isoLabels);
+    if (++n >= 80) break;
+  }
+}
+map.on("moveend zoomend", updateIsoLabels);
+isoLabels.addTo(map);
 let shomLayer = null;
 const shomUrl = key => "https://services.data.shom.fr/" + encodeURIComponent(key) + "/wmts?layer=RASTER_MARINE_3857_WMTS&style=normal&tilematrixset=3857&Service=WMTS&Request=GetTile&Version=1.0.0&Format=image%2Fpng&TileMatrix={z}&TileCol={x}&TileRow={y}";
 let shomWarned = false;
 function shomError() { if (!shomWarned) { shomWarned = true; toast("Carte Shom refusée : vérifie ta clé d'accès"); } }
 function applyLayers() {
+  if (S.layers.iso) loadIso().then(d => {
+    if (!isoLayer) isoLayer = L.geoJSON(d, { interactive: false, renderer: L.canvas({ padding: 0.3 }), attribution: "Isobathes d'après EMODnet Bathymétrie",
+      style: f => { const s = ISO[Math.abs(f.properties.alt)] || ISO[50]; return { color: s[0], weight: s[1], dashArray: s[2] || null, opacity: 0.9 }; } });
+    if (S.layers.iso) { isoLayer.addTo(map); updateIsoLabels(); }
+  }).catch(() => toast("Isobathes indisponibles hors ligne pour l'instant"));
+  else if (isoLayer) { map.removeLayer(isoLayer); updateIsoLabels(); }
   if (shomLayer) { map.removeLayer(shomLayer); shomLayer = null; }
   if (S.layers.shom && S.shomKey) { shomLayer = L.tileLayer(shomUrl(S.shomKey), { maxZoom: 18, attribution: "© Shom" }); shomLayer.on("tileerror", shomError); shomLayer.addTo(map); }
   S.layers.seamark ? seamark.addTo(map) : map.removeLayer(seamark);
@@ -569,12 +602,16 @@ function pasteSheet() {
 function layersSheet() {
   openSheet('<h2>Couches de la carte</h2>' +
     '<label class="f" style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="lSea"' + (S.layers.seamark ? " checked" : "") + ' style="width:22px;height:22px"> Balisage OpenSeaMap <span class="h">bouées, feux, épaves, roches</span></label>' +
+    '<label class="f" style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="lIso"' + (S.layers.iso ? " checked" : "") + ' style="width:22px;height:22px"> Lignes de profondeur <span class="h">0, 2, 5, 10, 20 et 50 m sous le zéro des cartes</span></label>' +
+    '<div class="note" style="display:flex;flex-wrap:wrap;gap:4px 12px"><span><i style="display:inline-block;width:18px;border-top:2px dashed #2f7d32;vertical-align:middle"></i> 0 m (limite qui découvre)</span><span><i style="display:inline-block;width:18px;border-top:2px solid #1565c0;vertical-align:middle"></i> 2 m</span><span><i style="display:inline-block;width:18px;border-top:2px solid #1e88e5;vertical-align:middle"></i> 5 m</span><span><i style="display:inline-block;width:18px;border-top:2px solid #64b5f6;vertical-align:middle"></i> 10 à 50 m</span></div>' +
+    '<p class="note">Calculées d\'après la grille EMODnet (maille d\'environ 115 m) : tracé lissé, une tête de roche isolée peut ne pas apparaître.</p>' +
     '<label class="f" style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="lDep"' + (S.layers.depth ? " checked" : "") + ' style="width:22px;height:22px"> Teinte des profondeurs EMODnet <span class="h">plus foncé = plus profond</span></label>' +
     '<label class="f" style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="lShom"' + (S.layers.shom ? " checked" : "") + (S.shomKey ? "" : " disabled") + ' style="width:22px;height:22px"> Carte marine Shom <span class="h">' + (S.shomKey ? "avec ta clé d\'accès Shom" : "nécessite une clé d\'accès Shom, à saisir dans ⚙ Réglages") + '</span></label>' +
     '<p class="note">Le fond OpenStreetMap n\'est pas une carte marine officielle : garde ta carte SHOM pour la navigation.</p>' +
     '<button class="btn primary" id="lOk">Fermer</button>', () => {
       $("#lSea").onchange = e => { S.layers.seamark = e.target.checked; applyLayers(); persist(); };
       $("#lDep").onchange = e => { S.layers.depth = e.target.checked; applyLayers(); persist(); };
+      $("#lIso").onchange = e => { S.layers.iso = e.target.checked; applyLayers(); persist(); };
       $("#lShom").onchange = e => { S.layers.shom = e.target.checked; shomWarned = false; applyLayers(); persist(); };
       $("#lOk").onclick = closeSheet;
     });
