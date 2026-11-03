@@ -9,7 +9,7 @@ const ZONE = {
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -489,7 +489,7 @@ function tideSheet() {
   if (!rows.length) rows = [{ k: "BM", t: "", h: "" }, { k: "PM", t: "", h: "" }, { k: "BM", t: "", h: "" }, { k: "PM", t: "", h: "" }];
   const dl = new Date(day + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   openSheet('<h2>Marées SHOM du ' + dl + '</h2><p class="note">Port : ' + ZONE.port + ". Recopie heures et hauteurs depuis maree.shom.fr. Elles remplacent le modèle automatique pour ce jour et servent à le recaler.</p>" +
-    '<div id="tRows" style="display:flex;flex-direction:column;gap:6px"></div><button class="btn ghost" id="tAdd">+ Ajouter une marée</button><div class="err" id="tErr" hidden></div>' +
+    '<div id="tRows" style="display:flex;flex-direction:column;gap:6px"></div><button class="btn ghost" id="tAdd">+ Ajouter une marée</button><button class="link" id="tPaste" style="align-self:flex-start">Coller plusieurs jours d\'un coup…</button><div class="err" id="tErr" hidden></div>' +
     '<div class="actions"><button class="btn ghost" id="tCancel">Annuler</button><button class="btn primary" id="tSave">Enregistrer</button></div>' +
     (S.manual[day] ? '<button class="link" id="tClear" style="color:var(--nogo);align-self:flex-start">Effacer et revenir au modèle automatique</button>' : ""),
   () => {
@@ -498,6 +498,7 @@ function tideSheet() {
     const upd = e => { const i = e.target.dataset.i; if (i !== undefined) rows[i][e.target.dataset.f] = e.target.value; };
     $("#tRows").addEventListener("input", upd); $("#tRows").addEventListener("change", upd);
     $("#tRows").addEventListener("click", e => { const i = e.target.dataset.del; if (i !== undefined) { rows.splice(+i, 1); draw(); } });
+    $("#tPaste").onclick = pasteSheet;
     $("#tAdd").onclick = () => { const l = rows[rows.length - 1]; rows.push({ k: l && l.k === "PM" ? "BM" : "PM", t: "", h: "" }); draw(); };
     $("#tCancel").onclick = closeSheet;
     const clr = $("#tClear"); if (clr) clr.onclick = () => { delete S.manual[day]; persist(); closeSheet(); render(); toast("Retour au modèle automatique"); };
@@ -517,6 +518,40 @@ function tideSheet() {
       persist(); closeSheet(); render(); toast("Marées enregistrées");
     };
   });
+}
+
+/* coller plusieurs jours : une marée par ligne, ex. « 2026-11-03 PM 12:55 7,30 » */
+function parseTides(txt) {
+  const days = {}, bad = [];
+  for (const line of txt.split(/\n/)) {
+    const l = line.trim(); if (!l) continue;
+    const m = l.match(/(\d{4})-(\d{2})-(\d{2})\D+(PM|BM)\D+(\d{1,2})[:h](\d{2})\D+(\d{1,2}[.,]\d{1,2})/i);
+    if (!m) { bad.push(l); continue; }
+    const d = m[1] + "-" + m[2] + "-" + m[3];
+    (days[d] = days[d] || []).push({ k: m[4].toUpperCase(), t: pad(+m[5]) + ":" + m[6], h: num(m[7]) });
+  }
+  for (const d in days) days[d].sort((a, b) => toMin(a.t) - toMin(b.t));
+  return { days, bad };
+}
+function pasteSheet() {
+  openSheet('<h2>Coller des marées SHOM</h2><p class="note">Une marée par ligne : date, PM ou BM, heure, hauteur. Exemple : <span class="num">2026-11-03 PM 12:55 7,30</span></p>' +
+    '<textarea class="in num" id="pTxt" rows="10" style="font-size:15px;min-height:200px" placeholder="2026-11-03 PM 00:26 7,02"></textarea>' +
+    '<div class="err" id="pErr2" hidden></div><div class="actions"><button class="btn ghost" id="pCan">Annuler</button><button class="btn primary" id="pOk">Importer et recaler</button></div>', () => {
+      $("#pCan").onclick = closeSheet;
+      $("#pOk").onclick = () => {
+        const { days, bad } = parseTides($("#pTxt").value), er = $("#pErr2"), list = Object.keys(days).sort();
+        const fail = m => { er.textContent = m; er.hidden = false; };
+        if (bad.length) return fail("Ligne non comprise : « " + bad[0] + " »");
+        if (!list.length) return fail("Aucune marée trouvée.");
+        for (const d of list) { const r = days[d]; for (let i = 1; i < r.length; i++) if (r[i].k === r[i - 1].k) return fail("Le " + d + ", les PM et BM ne se suivent pas (" + r[i].t + ")."); }
+        for (const d of list) S.manual[d] = days[d];
+        let msg = list.length + " jour" + (list.length > 1 ? "s" : "") + " importé" + (list.length > 1 ? "s" : "");
+        const cal = calibration(list[0]);
+        if (cal) { S.nm = cal.nm; S.scale = cal.scale; S.shift = cal.shift; dayCache = {}; msg += ", modèle recalé (" + (cal.shift >= 0 ? "+" : "−") + Math.abs(cal.shift) + " min)"; }
+        else msg += ". Recalage dès que la prédiction sera calculée";
+        persist(); closeSheet(); render(); toast(msg);
+      };
+    });
 }
 
 function layersSheet() {

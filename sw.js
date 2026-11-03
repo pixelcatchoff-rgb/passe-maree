@@ -1,8 +1,8 @@
 /* Passe-Marée — fonctionnement hors ligne */
-const SHELL = "pm-shell-1.5.0";
+const SHELL = "pm-shell-1.6.0";
 const TILES = "pm-tiles-1";
 const MAX_TILES = 3000;
-const FILES = ["./", "index.html", "tide.js?v=1.5.0", "app.js?v=1.5.0", "manifest.webmanifest", "vendor/leaflet.js", "vendor/leaflet.css",
+const FILES = ["./", "index.html", "tide.js?v=1.6.0", "app.js?v=1.6.0", "manifest.webmanifest", "vendor/leaflet.js", "vendor/leaflet.css",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {
