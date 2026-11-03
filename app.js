@@ -9,7 +9,7 @@ const ZONE = {
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -30,7 +30,7 @@ const dur = m => { m = Math.round(m); return m < 60 ? m + " min" : Math.floor(m 
 const KEY = "passemaree.v1", HKEY = "passemaree.harm.v1";
 function load(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { toast("Mémoire du téléphone pleine"); } }
-const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, nm: ZONE.nm, scale: 1, layers: { seamark: true, depth: false }, view: null };
+const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, nm: ZONE.nm, scale: 1, shift: 0, layers: { seamark: true, depth: false }, view: null };
 let S = Object.assign({}, DEF, load(KEY) || {});
 S.layers = Object.assign({}, DEF.layers, S.layers || {});
 const persist = () => save(KEY, S);
@@ -71,14 +71,15 @@ async function fetchTide(force) {
 }
 /* niveau prédit (par rapport au niveau moyen) pour un jour local, échantillonné toutes les 5 min de -60 à +1500 min */
 let dayCache = {};
-function mslDay(d) {
+function mslDay(d, noShift) {
   if (!P) return null;
-  if (dayCache[d]) return dayCache[d];
+  const sh = noShift ? 0 : (S.shift || 0), key = d + "|" + sh;
+  if (dayCache[key]) return dayCache[key];
   const [y, mo, da] = d.split("-").map(Number), t0 = new Date(y, mo - 1, da, 0, 0, 0).getTime();
   const arr = new Float64Array(313);
-  for (let i = 0; i < 313; i++) arr[i] = P(t0 + (i * 5 - 60) * 60000);
-  const keys = Object.keys(dayCache); if (keys.length > 40) delete dayCache[keys[0]];
-  return (dayCache[d] = arr);
+  for (let i = 0; i < 313; i++) arr[i] = P(t0 + (i * 5 - 60 - sh) * 60000);
+  const keys = Object.keys(dayCache); if (keys.length > 60) delete dayCache[keys[0]];
+  return (dayCache[key] = arr);
 }
 function mslAtDay(arr, m) { const x = (m + 60) / 5, i = Math.max(0, Math.min(311, Math.floor(x))), f = x - i; return arr[i] + (arr[i + 1] - arr[i]) * f; }
 
@@ -105,18 +106,42 @@ function model(d) {
   }
   return null;
 }
-/* compare le modèle aux PM/BM saisies : écart maximal et réglage (amplitude + niveau moyen) qui l'annule au mieux */
+/* compare le modèle aux PM/BM SHOM saisies (tous les jours saisis) :
+   décalage horaire moyen, puis amplitude et niveau moyen qui collent le mieux */
+function modelExtremes(arr) {
+  const out = [];
+  for (let i = 1; i < 312; i++) {
+    const a = arr[i - 1], b = arr[i], c = arr[i + 1];
+    if ((b > a && b >= c) || (b < a && b <= c)) {
+      const den = a - 2 * b + c, off = den ? 0.5 * (a - c) / den : 0; // sommet affiné par parabole
+      out.push({ m: (i + off) * 5 - 60, k: b > a ? "PM" : "BM" });
+    }
+  }
+  return out;
+}
 function calibration(d) {
-  const man = manualModel(d), arr = mslDay(d); if (!man || !arr) return null;
-  const pts = man.raw.map(e => [mslAtDay(arr, e.m), e.h]).filter(q => isFinite(q[0]));
-  if (!pts.length) return null;
-  let err = 0; for (const [x, y] of pts) err = Math.max(err, Math.abs(y - (x * (S.scale || 1) + S.nm)));
+  if (!P || !manualModel(d)) return null;
+  const days = Object.keys(S.manual).filter(k => manualModel(k));
+  const dts = [], dayDt = [];
+  for (const k of days) {
+    const ex = modelExtremes(mslDay(k, true));
+    for (const e of manualModel(k).raw) {
+      let best = null; for (const q of ex) if (q.k === e.k && (!best || Math.abs(q.m - e.m) < Math.abs(best.m - e.m))) best = q;
+      if (best && Math.abs(best.m - e.m) <= 180) { dts.push(e.m - best.m); if (k === d) dayDt.push(e.m - best.m); }
+    }
+  }
+  const shift = dts.length ? Math.round(dts.reduce((t, x) => t + x, 0) / dts.length) : (S.shift || 0);
+  const pts = [];
+  for (const k of days) { const a0 = mslDay(k, true); for (const e of manualModel(k).raw) pts.push([mslAtDay(a0, e.m - shift), e.h, e.k]); }
   const n = pts.length, mx = pts.reduce((t, q) => t + q[0], 0) / n, my = pts.reduce((t, q) => t + q[1], 0) / n;
   let sxx = 0, sxy = 0; for (const [x, y] of pts) { sxx += (x - mx) ** 2; sxy += (x - mx) * (y - my); }
   let scale = S.scale || 1;
-  const hasBoth = man.raw.some(e => e.k === "PM") && man.raw.some(e => e.k === "BM");
-  if (hasBoth && sxx > 0.5) scale = Math.min(1.6, Math.max(0.6, sxy / sxx));
-  return { err, scale: +scale.toFixed(4), nm: +(my - scale * mx).toFixed(3) };
+  if (pts.some(q => q[2] === "PM") && pts.some(q => q[2] === "BM") && sxx > 0.5) scale = Math.min(1.6, Math.max(0.6, sxy / sxx));
+  // écart actuel, pour le jour affiché
+  const cur0 = mslDay(d); let err = 0;
+  for (const e of manualModel(d).raw) err = Math.max(err, Math.abs(e.h - (mslAtDay(cur0, e.m) * (S.scale || 1) + S.nm)));
+  const dt = dayDt.length ? Math.round(dayDt.reduce((t, x) => t + x, 0) / dayDt.length) - (S.shift || 0) : 0;
+  return { err, dt, shift, scale: +scale.toFixed(4), nm: +(my - scale * mx).toFixed(3), days: days.length };
 }
 
 /* ---------- calcul de passage ---------- */
@@ -290,10 +315,14 @@ function render() {
   const cal = calibration(day);
   if (!M && tideState === "loading") b = '<div class="banner">Première analyse de la marée en cours (une année de données à télécharger)…</div>';
   else if (!M) b = '<div class="banner">Marée automatique indisponible (pas de réseau ?). Saisis les PM/BM du SHOM pour ce jour, ou réessaie plus tard.</div>';
-  else if (cal !== null && cal.err >= 0.08 && Math.abs(cal.nm - S.nm) < 0.02 && Math.abs(cal.scale - (S.scale || 1)) < 0.01) b = '<div class="banner">Le modèle reste à ' + fmt(cal.err, 2) + ' m des PM/BM SHOM saisies (décalage d\'heure). Pour ce jour, ce sont tes PM/BM SHOM qui sont utilisées.</div>';
-  else if (cal !== null && cal.err >= 0.08) b = '<div class="banner">Le modèle s\'écarte jusqu\'à <b>' + fmt(cal.err, 2) + ' m</b> des PM/BM SHOM saisies. <button class="link" id="recal">Recaler le modèle</button></div>';
+  else if (cal !== null) {
+    const same = Math.abs(cal.nm - S.nm) < 0.02 && Math.abs(cal.scale - (S.scale || 1)) < 0.01 && Math.abs(cal.shift - (S.shift || 0)) < 3;
+    const gap = (Math.abs(cal.dt) >= 5 ? "<b>" + (cal.dt > 0 ? "+" : "−") + Math.abs(cal.dt) + " min</b> " : "") + (cal.err >= 0.08 ? (Math.abs(cal.dt) >= 5 ? "et " : "") + "<b>" + fmt(cal.err, 2) + " m</b> " : "");
+    if (gap && !same) b = '<div class="banner">Le modèle est décalé de ' + gap + 'par rapport aux PM/BM SHOM saisies. <button class="link" id="recal">Recaler le modèle</button></div>';
+    else if (gap) b = '<div class="banner">Après recalage, il reste ' + gap + 'd\'écart ce jour-là. Pour ce jour, ce sont tes PM/BM SHOM qui sont utilisées.</div>';
+  }
   $("#tideBanner").innerHTML = b;
-  const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = cal.nm; S.scale = cal.scale; dayCache = {}; persist(); render(); toast("Modèle recalé sur le SHOM"); };
+  const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = cal.nm; S.scale = cal.scale; S.shift = cal.shift; dayCache = {}; persist(); render(); toast("Modèle recalé sur le SHOM (" + cal.days + " jour" + (cal.days > 1 ? "s" : "") + " saisi" + (cal.days > 1 ? "s" : "") + ")"); };
   drawCurve(M); drawCards(M); drawMarkers(M); renderProbe();
 }
 
@@ -511,7 +540,7 @@ function settingsSheet() {
     '<div class="row2"><label class="f">Tirant d\'eau (m)<input class="in num" id="bDraft" inputmode="decimal" value="' + fmt(b.draft, 2) + '"></label><label class="f">Pied de pilote (m)<input class="in num" id="bKeel" inputmode="decimal" value="' + fmt(b.keel, 2) + '"></label></div>' +
     '<p class="note">Tirant d\'eau : fiche constructeur, ou mesure du point le plus bas (quille, embase moteur baissée) sous la flottaison, bateau chargé. Pied de pilote : 0,3 m sur sable par mer calme, 0,5 à 1 m sur roches ou avec houle.</p>' +
     '<label class="f">Niveau moyen à ' + ZONE.port + ' (m) <span class="h">Hauteur du niveau moyen au-dessus du zéro des cartes. Valeur de référence 5,25 m ; se règle tout seul avec « Recaler le modèle ».</span><input class="in num" id="bNm" inputmode="decimal" value="' + fmt(S.nm, 2) + '"></label>' +
-    '<p class="note">Amplitude du modèle : ×' + fmt(S.scale || 1, 2) + '. <button class="link" id="calReset">Revenir aux valeurs d\'origine</button></p>' +
+    '<p class="note">Recalage : amplitude ×' + fmt(S.scale || 1, 2) + ', décalage horaire ' + ((S.shift || 0) >= 0 ? "+" : "−") + Math.abs(S.shift || 0) + ' min. <button class="link" id="calReset">Revenir aux valeurs d\'origine</button></p>' +
     '<p class="note">' + (harm ? "Prédiction calculée sur " + harm.F.days + " jours de données (" + harm.F.cons.length + " composantes, écart résiduel " + Math.round(harm.F.rms * 100) + " cm), mise à jour le " + new Date(harm.fittedAt).toLocaleDateString("fr-FR") + "." : "Prédiction pas encore calculée.") + '</p>' +
     '<label class="f">Clé d\'accès Shom <span class="h">Facultatif. Pour afficher les cartes marines raster du Shom, il faut une clé délivrée par le Shom pour ce site.</span><input class="in" id="bShom" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(S.shomKey || "") + '"></label>' +
     '<div class="err" id="bErr" hidden></div>' +
@@ -527,7 +556,7 @@ function settingsSheet() {
       S.boat = { name: $("#bName").value.trim() || "Mon bateau", draft: d, keel: k }; S.nm = nm;
       const key = $("#bShom").value.trim(); if (key !== (S.shomKey || "")) { S.shomKey = key; S.layers.shom = !!key; shomWarned = false; applyLayers(); } persist(); closeSheet(); render(); toast("Réglages enregistrés");
     };
-    $("#calReset").onclick = () => { S.nm = ZONE.nm; S.scale = 1; persist(); closeSheet(); render(); toast("Valeurs d'origine rétablies"); };
+    $("#calReset").onclick = () => { S.nm = ZONE.nm; S.scale = 1; S.shift = 0; dayCache = {}; persist(); closeSheet(); render(); toast("Valeurs d'origine rétablies"); };
     $("#reTide").onclick = () => { closeSheet(); fetchTide(true); };
     $("#exp").onclick = () => {
       const blob = new Blob([JSON.stringify(S, null, 1)], { type: "application/json" });
