@@ -7,9 +7,11 @@ const ZONE = {
   port: "Roscoff",
   tideLat: 48.73, tideLon: -3.98,   // point en mer devant Roscoff pour le modèle de marée
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
+  // recalage intégré pour tous : niveau moyen, amplitude et décalage horaire du modèle par rapport au SHOM
+  cal: { nm: 5.25, scale: 1, shift: 0 },
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.6.0";
+const VERSION = "1.7.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -30,9 +32,16 @@ const dur = m => { m = Math.round(m); return m < 60 ? m + " min" : Math.floor(m 
 const KEY = "passemaree.v1", HKEY = "passemaree.harm.v1";
 function load(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { toast("Mémoire du téléphone pleine"); } }
-const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, nm: ZONE.nm, scale: 1, shift: 0, layers: { seamark: true, depth: false }, view: null };
+const DEF = { boat: { name: "Mon bateau", draft: 0.9, keel: 0.5 }, points: [], manual: {}, cal: null, layers: { seamark: true, depth: false }, view: null };
 let S = Object.assign({}, DEF, load(KEY) || {});
 S.layers = Object.assign({}, DEF.layers, S.layers || {});
+// anciennes versions : réglage stocké à plat ; on ne le garde que s'il a été modifié par l'utilisateur
+if ("nm" in S || "scale" in S || "shift" in S) {
+  const o = { nm: S.nm ?? 5.25, scale: S.scale ?? 1, shift: S.shift ?? 0 };
+  if (!S.cal && (Math.abs(o.nm - 5.25) > 1e-3 || Math.abs(o.scale - 1) > 1e-4 || o.shift)) S.cal = o;
+  delete S.nm; delete S.scale; delete S.shift;
+}
+const C = () => S.cal || ZONE.cal;
 const persist = () => save(KEY, S);
 
 let day = todayStr(), cur = nowMin(), selId = S.points[0] && S.points[0].id;
@@ -73,7 +82,7 @@ async function fetchTide(force) {
 let dayCache = {};
 function mslDay(d, noShift) {
   if (!P) return null;
-  const sh = noShift ? 0 : (S.shift || 0), key = d + "|" + sh;
+  const sh = noShift ? 0 : C().shift, key = d + "|" + sh;
   if (dayCache[key]) return dayCache[key];
   const [y, mo, da] = d.split("-").map(Number), t0 = new Date(y, mo - 1, da, 0, 0, 0).getTime();
   const arr = new Float64Array(313);
@@ -99,7 +108,7 @@ function model(d) {
   if (man) return { src: "shom", fn: man.fn, raw: man.raw, extrapFrom: man.raw[0].m, extrapTo: man.raw[man.raw.length - 1].m };
   const arr = mslDay(d);
   if (arr) {
-    const k = S.scale || 1, z = S.nm, fn = m => mslAtDay(arr, m) * k + z, raw = [];
+    const k = C().scale, z = C().nm, fn = m => mslAtDay(arr, m) * k + z, raw = [];
     let prev = fn(-15), c = fn(0);
     for (let m = 0; m <= 1440; m += 5) { const n = fn(m + 5); if (c >= prev && c > n) raw.push({ m, h: c, k: "PM" }); if (c <= prev && c < n) raw.push({ m, h: c, k: "BM" }); prev = c; c = n; }
     return { src: "auto", fn, raw, extrapFrom: 0, extrapTo: 1440 };
@@ -130,17 +139,17 @@ function calibration(d) {
       if (best && Math.abs(best.m - e.m) <= 180) { dts.push(e.m - best.m); if (k === d) dayDt.push(e.m - best.m); }
     }
   }
-  const shift = dts.length ? Math.round(dts.reduce((t, x) => t + x, 0) / dts.length) : (S.shift || 0);
+  const shift = dts.length ? Math.round(dts.reduce((t, x) => t + x, 0) / dts.length) : C().shift;
   const pts = [];
   for (const k of days) { const a0 = mslDay(k, true); for (const e of manualModel(k).raw) pts.push([mslAtDay(a0, e.m - shift), e.h, e.k]); }
   const n = pts.length, mx = pts.reduce((t, q) => t + q[0], 0) / n, my = pts.reduce((t, q) => t + q[1], 0) / n;
   let sxx = 0, sxy = 0; for (const [x, y] of pts) { sxx += (x - mx) ** 2; sxy += (x - mx) * (y - my); }
-  let scale = S.scale || 1;
+  let scale = C().scale;
   if (pts.some(q => q[2] === "PM") && pts.some(q => q[2] === "BM") && sxx > 0.5) scale = Math.min(1.6, Math.max(0.6, sxy / sxx));
   // écart actuel, pour le jour affiché
   const cur0 = mslDay(d); let err = 0;
-  for (const e of manualModel(d).raw) err = Math.max(err, Math.abs(e.h - (mslAtDay(cur0, e.m) * (S.scale || 1) + S.nm)));
-  const dt = dayDt.length ? Math.round(dayDt.reduce((t, x) => t + x, 0) / dayDt.length) - (S.shift || 0) : 0;
+  for (const e of manualModel(d).raw) err = Math.max(err, Math.abs(e.h - (mslAtDay(cur0, e.m) * C().scale + C().nm)));
+  const dt = dayDt.length ? Math.round(dayDt.reduce((t, x) => t + x, 0) / dayDt.length) - C().shift : 0;
   return { err, dt, shift, scale: +scale.toFixed(4), nm: +(my - scale * mx).toFixed(3), days: days.length };
 }
 
@@ -316,13 +325,13 @@ function render() {
   if (!M && tideState === "loading") b = '<div class="banner">Première analyse de la marée en cours (une année de données à télécharger)…</div>';
   else if (!M) b = '<div class="banner">Marée automatique indisponible (pas de réseau ?). Saisis les PM/BM du SHOM pour ce jour, ou réessaie plus tard.</div>';
   else if (cal !== null) {
-    const same = Math.abs(cal.nm - S.nm) < 0.02 && Math.abs(cal.scale - (S.scale || 1)) < 0.01 && Math.abs(cal.shift - (S.shift || 0)) < 3;
+    const same = Math.abs(cal.nm - C().nm) < 0.02 && Math.abs(cal.scale - C().scale) < 0.01 && Math.abs(cal.shift - C().shift) < 3;
     const gap = (Math.abs(cal.dt) >= 5 ? "<b>" + (cal.dt > 0 ? "+" : "−") + Math.abs(cal.dt) + " min</b> " : "") + (cal.err >= 0.08 ? (Math.abs(cal.dt) >= 5 ? "et " : "") + "<b>" + fmt(cal.err, 2) + " m</b> " : "");
     if (gap && !same) b = '<div class="banner">Le modèle est décalé de ' + gap + 'par rapport aux PM/BM SHOM saisies. <button class="link" id="recal">Recaler le modèle</button></div>';
     else if (gap) b = '<div class="banner">Après recalage, il reste ' + gap + 'd\'écart ce jour-là. Pour ce jour, ce sont tes PM/BM SHOM qui sont utilisées.</div>';
   }
   $("#tideBanner").innerHTML = b;
-  const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = cal.nm; S.scale = cal.scale; S.shift = cal.shift; dayCache = {}; persist(); render(); toast("Modèle recalé sur le SHOM (" + cal.days + " jour" + (cal.days > 1 ? "s" : "") + " saisi" + (cal.days > 1 ? "s" : "") + ")"); };
+  const rc = $("#recal"); if (rc) rc.onclick = () => { S.cal = { nm: cal.nm, scale: cal.scale, shift: cal.shift }; dayCache = {}; persist(); render(); toast("Modèle recalé sur le SHOM (" + cal.days + " jour" + (cal.days > 1 ? "s" : "") + " saisi" + (cal.days > 1 ? "s" : "") + ")"); };
   drawCurve(M); drawCards(M); drawMarkers(M); renderProbe();
 }
 
@@ -547,7 +556,7 @@ function pasteSheet() {
         for (const d of list) S.manual[d] = days[d];
         let msg = list.length + " jour" + (list.length > 1 ? "s" : "") + " importé" + (list.length > 1 ? "s" : "");
         const cal = calibration(list[0]);
-        if (cal) { S.nm = cal.nm; S.scale = cal.scale; S.shift = cal.shift; dayCache = {}; msg += ", modèle recalé (" + (cal.shift >= 0 ? "+" : "−") + Math.abs(cal.shift) + " min)"; }
+        if (cal) { S.cal = { nm: cal.nm, scale: cal.scale, shift: cal.shift }; dayCache = {}; msg += ", modèle recalé (" + (cal.shift >= 0 ? "+" : "−") + Math.abs(cal.shift) + " min)"; }
         else msg += ". Recalage dès que la prédiction sera calculée";
         persist(); closeSheet(); render(); toast(msg);
       };
@@ -574,8 +583,8 @@ function settingsSheet() {
     '<label class="f">Nom du bateau<input class="in" id="bName" maxlength="50" value="' + esc(b.name) + '"></label>' +
     '<div class="row2"><label class="f">Tirant d\'eau (m)<input class="in num" id="bDraft" inputmode="decimal" value="' + fmt(b.draft, 2) + '"></label><label class="f">Pied de pilote (m)<input class="in num" id="bKeel" inputmode="decimal" value="' + fmt(b.keel, 2) + '"></label></div>' +
     '<p class="note">Tirant d\'eau : fiche constructeur, ou mesure du point le plus bas (quille, embase moteur baissée) sous la flottaison, bateau chargé. Pied de pilote : 0,3 m sur sable par mer calme, 0,5 à 1 m sur roches ou avec houle.</p>' +
-    '<label class="f">Niveau moyen à ' + ZONE.port + ' (m) <span class="h">Hauteur du niveau moyen au-dessus du zéro des cartes. Valeur de référence 5,25 m ; se règle tout seul avec « Recaler le modèle ».</span><input class="in num" id="bNm" inputmode="decimal" value="' + fmt(S.nm, 2) + '"></label>' +
-    '<p class="note">Recalage : amplitude ×' + fmt(S.scale || 1, 2) + ', décalage horaire ' + ((S.shift || 0) >= 0 ? "+" : "−") + Math.abs(S.shift || 0) + ' min. <button class="link" id="calReset">Revenir aux valeurs d\'origine</button></p>' +
+    '<label class="f">Niveau moyen à ' + ZONE.port + ' (m) <span class="h">Hauteur du niveau moyen au-dessus du zéro des cartes. Réglé d\'origine dans l\'appli ; « Recaler le modèle » l\'affine avec tes PM/BM SHOM.</span><input class="in num" id="bNm" inputmode="decimal" value="' + fmt(C().nm, 2) + '"></label>' +
+    '<p class="note num">Recalage ' + (S.cal ? "personnel" : "intégré") + ' : niveau ' + C().nm.toFixed(3) + ' m, amplitude ×' + C().scale.toFixed(4) + ', décalage ' + (C().shift >= 0 ? "+" : "−") + Math.abs(C().shift) + ' min.' + (S.cal ? ' <button class="link" id="calReset">Revenir au réglage intégré</button>' : "") + '</p>' +
     '<p class="note">' + (harm ? "Prédiction calculée sur " + harm.F.days + " jours de données (" + harm.F.cons.length + " composantes, écart résiduel " + Math.round(harm.F.rms * 100) + " cm), mise à jour le " + new Date(harm.fittedAt).toLocaleDateString("fr-FR") + "." : "Prédiction pas encore calculée.") + '</p>' +
     '<label class="f">Clé d\'accès Shom <span class="h">Facultatif. Pour afficher les cartes marines raster du Shom, il faut une clé délivrée par le Shom pour ce site.</span><input class="in" id="bShom" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(S.shomKey || "") + '"></label>' +
     '<div class="err" id="bErr" hidden></div>' +
@@ -588,10 +597,11 @@ function settingsSheet() {
     $("#bSave").onclick = () => {
       const d = num($("#bDraft").value), k = num($("#bKeel").value), nm = num($("#bNm").value);
       if (!(d > 0 && d < 10) || !(k >= 0 && k < 5) || !(nm > 0 && nm < 10)) { $("#bErr").textContent = "Vérifie les valeurs, en mètres (ex. 0,9 et 0,5)."; $("#bErr").hidden = false; return; }
-      S.boat = { name: $("#bName").value.trim() || "Mon bateau", draft: d, keel: k }; S.nm = nm;
+      S.boat = { name: $("#bName").value.trim() || "Mon bateau", draft: d, keel: k };
+      if (Math.abs(nm - C().nm) >= 0.005) { S.cal = Object.assign({}, C(), { nm }); dayCache = {}; }
       const key = $("#bShom").value.trim(); if (key !== (S.shomKey || "")) { S.shomKey = key; S.layers.shom = !!key; shomWarned = false; applyLayers(); } persist(); closeSheet(); render(); toast("Réglages enregistrés");
     };
-    $("#calReset").onclick = () => { S.nm = ZONE.nm; S.scale = 1; S.shift = 0; dayCache = {}; persist(); closeSheet(); render(); toast("Valeurs d'origine rétablies"); };
+    const cr = $("#calReset"); if (cr) cr.onclick = () => { S.cal = null; dayCache = {}; persist(); closeSheet(); render(); toast("Réglage intégré rétabli"); };
     $("#reTide").onclick = () => { closeSheet(); fetchTide(true); };
     $("#exp").onclick = () => {
       const blob = new Blob([JSON.stringify(S, null, 1)], { type: "application/json" });
