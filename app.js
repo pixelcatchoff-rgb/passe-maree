@@ -9,7 +9,7 @@ const ZONE = {
   nm: 5.25,                          // niveau moyen au-dessus du zéro hydrographique à Roscoff
   center: [48.70, -3.95], zoom: 12
 };
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 /* ---------- utilitaires ---------- */
 const $ = s => document.querySelector(s);
@@ -142,17 +142,56 @@ function applyLayers() {
 applyLayers();
 map.on("moveend", () => { const c = map.getCenter(); S.view = { lat: +c.lat.toFixed(5), lon: +c.lng.toFixed(5), z: map.getZoom() }; persist(); });
 
-let addMode = false, tempMarker = null, meMarker = null;
+let tempMarker = null, meMarker = null, probe = null, probeMarker = null;
 const markers = {};
-function setAddMode(on) { addMode = on; if (on) openDrawer(false);$("#addMode").classList.toggle("on", on); $("#tapHint").hidden = !on; }
-$("#addMode").onclick = () => setAddMode(!addMode);
-map.on("click", e => {
-  if (!addMode) return;
-  setAddMode(false);
-  if (tempMarker) map.removeLayer(tempMarker);
-  tempMarker = L.circleMarker(e.latlng, { radius: 9, color: "#0d5c7d", weight: 3, fillOpacity: 0.3 }).addTo(map);
-  pointSheet(null, e.latlng);
-});
+
+/* ---------- consultation d'un point (toucher la carte) ---------- */
+map.on("click", e => showProbe(e.latlng));
+function showProbe(ll) {
+  openDrawer(false);
+  const id = uid();
+  probe = { id, lat: ll.lat, lon: ll.lng, state: "loading" };
+  if (probeMarker) map.removeLayer(probeMarker);
+  probeMarker = L.circleMarker(ll, { radius: 10, color: "#ffffff", weight: 3, fillColor: "#0d5c7d", fillOpacity: 0.9 }).addTo(map);
+  renderProbe();
+  lookupDepth(ll.lat, ll.lng).then(d => {
+    if (!probe || probe.id !== id) return;
+    Object.assign(probe, { state: "ok", depth: d, type: d.shallow >= 0 ? "sonde" : "decouvrant", value: +Math.abs(d.shallow).toFixed(1) });
+    renderProbe();
+  }).catch(() => { if (probe && probe.id === id) { probe.state = "err"; renderProbe(); } });
+}
+function closeProbe() { probe = null; if (probeMarker) { map.removeLayer(probeMarker); probeMarker = null; } renderProbe(); }
+function renderProbe() {
+  const el = $("#probe");
+  if (!probe || !$("#drawer").classList.contains("closed")) { el.hidden = true; return; }
+  el.hidden = false;
+  el.style.bottom = ($("#drawer").offsetHeight + 8) + "px";
+  const M = model(day);
+  let body = "";
+  if (probe.state === "loading") body = '<div class="meta">Recherche de la sonde…</div>';
+  else if (probe.state === "err") body = '<div class="meta">Sonde automatique indisponible (pas de réseau ou serveur EMODnet).</div><div class="actions"><button class="btn ghost small" id="pbRetry">Réessayer</button><button class="btn primary small" id="pbManual">Saisir la sonde</button></div>';
+  else {
+    const st = status(M, probe);
+    const sonde = probe.type === "decouvrant" ? "Découvrant estimé " + fmt(probe.value, 1) + " m" : "Sonde estimée " + fmt(probe.value, 1) + " m";
+    let wt = "", tr = "";
+    if (M) {
+      const ws = windows(M, probe);
+      wt = !ws.length ? "Aucun créneau ce jour avec ton bateau." : (ws.length === 1 && ws[0][0] === 0 && ws[0][1] === 1440) ? "<strong>Passe toute la journée</strong>" :
+        ws.map(w => '<strong class="num">' + (w[0] === 0 ? "00h00" : hm(w[0])) + " → " + (w[1] === 1440 ? "24h00" : hm(w[1])) + "</strong>").join(" · ");
+      tr = '<div class="track">' + ws.map(w => '<span style="left:' + (w[0] / 14.4) + "%;width:" + ((w[1] - w[0]) / 14.4) + '%"></span>').join("") + '<b style="left:calc(' + (cur / 14.4) + '% - 1px)"></b></div>';
+    }
+    body = '<div class="card-top"><div class="t"><div class="meta num">' + sonde + ' · EMODnet</div></div><span class="pill ' + st.cls + '">' + st.txt + "</span></div>" +
+      '<div class="wins">' + wt + "</div>" + tr +
+      '<div class="actions"><button class="btn ghost small" id="pbFix">Corriger la sonde</button><button class="btn primary small" id="pbSave">Enregistrer</button></div>';
+  }
+  el.innerHTML = '<div class="probe-head"><div><b>Point consulté</b> <span class="meta num">' + dms(probe.lat, "N", "S") + " · " + dms(probe.lon, "E", "W") + " · à " + hm(cur) + '</span></div><button class="x" id="pbClose" aria-label="Fermer">×</button></div>' + body;
+  $("#pbClose").onclick = closeProbe;
+  const ll = { lat: probe.lat, lng: probe.lon };
+  const r = $("#pbRetry"); if (r) r.onclick = () => showProbe(ll);
+  const m = $("#pbManual"); if (m) m.onclick = () => pointSheet(null, ll, null);
+  const f = $("#pbFix"); if (f) f.onclick = () => pointSheet(null, ll, probe);
+  const sv = $("#pbSave"); if (sv) sv.onclick = () => pointSheet(null, ll, probe);
+}
 
 function drawMarkers(M) {
   const seen = {};
@@ -222,7 +261,7 @@ function render() {
   else if (cal !== null && Math.abs(cal) >= 0.05) b = '<div class="banner">Écart modèle / SHOM ce jour : <b>' + (cal > 0 ? "+" : "") + fmt(cal, 2) + ' m</b>. <button class="link" id="recal">Recaler le modèle</button></div>';
   $("#tideBanner").innerHTML = b;
   const rc = $("#recal"); if (rc) rc.onclick = () => { S.nm = +(S.nm + cal).toFixed(3); persist(); render(); toast("Modèle recalé sur le SHOM"); };
-  drawCurve(M); drawCards(M); drawMarkers(M);
+  drawCurve(M); drawCards(M); drawMarkers(M); renderProbe();
 }
 
 function drawCurve(M) {
@@ -251,7 +290,7 @@ function drawCurve(M) {
 
 function drawCards(M) {
   const c = $("#cards");
-  if (!S.points.length) { c.innerHTML = '<div class="empty">Aucun passage enregistré. Touche <b>＋</b> en haut à droite puis l\'endroit sur la carte : la sonde est récupérée automatiquement.</div>'; return; }
+  if (!S.points.length) { c.innerHTML = '<div class="empty">Aucun passage enregistré. Touche un endroit de la carte : la sonde est récupérée et tu vois tout de suite si ça passe. Tu peux ensuite l\'enregistrer.</div>'; return; }
   let html = "";
   for (const p of S.points) {
     const st = status(M, p);
@@ -273,12 +312,40 @@ function drawCards(M) {
 }
 
 /* ---------- tiroir ---------- */
-function openDrawer(open) { $("#drawer").classList.toggle("closed", !open); }
+function openDrawer(open) { $("#drawer").classList.toggle("closed", !open); if (!open) $(".more").scrollTop = 0; renderProbe(); }
+/* glisser le tiroir vers le bas pour le fermer, vers le haut pour l'ouvrir */
+(function () {
+  const dr = $("#drawer"), more = $(".more");
+  let y0 = null, dy = 0, active = false;
+  dr.addEventListener("touchstart", e => {
+    y0 = null; dy = 0; active = false;
+    if (e.target.closest('input[type=range], svg, input, select')) return;
+    if (e.target.closest(".more") && more.scrollTop > 0) return;
+    y0 = e.touches[0].clientY;
+  }, { passive: true });
+  dr.addEventListener("touchmove", e => {
+    if (y0 === null) return;
+    dy = e.touches[0].clientY - y0;
+    const closed = dr.classList.contains("closed");
+    if (!closed && dy > 8 && (!e.target.closest(".more") || more.scrollTop <= 0)) {
+      active = true; e.preventDefault(); dr.style.transition = "none"; dr.style.transform = "translateY(" + dy + "px)";
+    } else if (closed && dy < -8) active = true;
+  }, { passive: false });
+  const end = () => {
+    if (y0 === null) return;
+    dr.style.transition = ""; dr.style.transform = "";
+    const closed = dr.classList.contains("closed");
+    if (active && !closed && dy > 60) openDrawer(false);
+    else if (active && closed && dy < -30) openDrawer(true);
+    y0 = null; active = false;
+  };
+  dr.addEventListener("touchend", end); dr.addEventListener("touchcancel", end);
+})();
 $("#handle").onclick = () => openDrawer($("#drawer").classList.contains("closed"));
 $("#slider").addEventListener("input", e => { cur = +e.target.value; render(); });
 $("#nowBtn").onclick = () => { day = todayStr(); cur = nowMin(); render(); };
 $("#day").addEventListener("change", e => { if (e.target.value) { day = e.target.value; render(); } });
-$("#addBtn2").onclick = () => { openDrawer(false); setAddMode(true); };
+$("#addBtn2").onclick = () => { openDrawer(false); toast("Touche la carte à l'endroit du passage"); };
 $("#tideBtn").onclick = tideSheet;
 $("#settings").onclick = settingsSheet;
 $("#layers").onclick = layersSheet;
@@ -302,9 +369,9 @@ function openSheet(html, mount) {
 }
 function closeSheet() { $("#layer").innerHTML = ""; if (tempMarker) { map.removeLayer(tempMarker); tempMarker = null; } }
 
-function pointSheet(p, latlng) {
+function pointSheet(p, latlng, preset) {
   const isNew = !p;
-  p = p ? Object.assign({}, p) : { id: uid(), name: "", type: "sonde", value: "", note: "", lat: latlng.lat, lon: latlng.lng, src: "manuel" };
+  p = p ? Object.assign({}, p) : { id: uid(), name: "", type: preset ? preset.type : "sonde", value: preset ? preset.value : "", note: "", lat: latlng.lat, lon: latlng.lng, src: preset ? "emodnet" : "manuel" };
   openSheet('<h2>' + (isNew ? "Nouveau passage" : "Modifier le passage") + '</h2>' +
     (p.lat != null ? '<div class="meta num">' + dms(p.lat, "N", "S") + " · " + dms(p.lon, "E", "W") + "</div>" : "") +
     '<div class="depthbox" id="dbox"></div>' +
@@ -332,7 +399,9 @@ function pointSheet(p, latlng) {
         if (isNew) apply(); else { const u = $("#useD"); if (u) u.onclick = apply; }
       }).catch(() => { box.innerHTML = 'Sonde automatique indisponible (pas de réseau ou serveur EMODnet). Saisis la sonde lue sur ta carte. <button class="link" id="retry">Réessayer</button>'; $("#retry").onclick = runLookup; });
     };
-    runLookup();
+    if (preset && preset.depth) { const d = preset.depth; box.innerHTML = (d.shallow >= 0 ? "Sonde estimée <b>" + fmt(d.shallow, 1) + " m</b>" : "Découvrant estimé <b>" + fmt(-d.shallow, 1) + " m</b>") + '<div class="meta">EMODnet, maille d\'environ 115 m. Corrige avec ta carte si besoin.</div>'; }
+    else if (preset === null) box.innerHTML = "Saisis la sonde lue sur ta carte.";
+    else runLookup();
     $("#pVal").addEventListener("input", () => { p.src = "manuel"; });
     $("#pCancel").onclick = closeSheet;
     $("#pSave").onclick = () => {
@@ -340,7 +409,7 @@ function pointSheet(p, latlng) {
       if (!isFinite(v) || v < 0 || v > 300) { er.textContent = "Entre la sonde en mètres, par exemple 1,2."; er.hidden = false; return; }
       const np = { id: p.id, name, type, value: v, note: $("#pNote").value.trim(), lat: p.lat, lon: p.lon, src: p.src };
       const i = S.points.findIndex(x => x.id === p.id); if (i >= 0) S.points[i] = np; else S.points.push(np);
-      selId = np.id; persist(); closeSheet(); openDrawer(true); render(); toast(isNew ? "Passage enregistré" : "Passage modifié");
+      selId = np.id; persist(); if (probe) closeProbe(); closeSheet(); openDrawer(true); render(); toast(isNew ? "Passage enregistré" : "Passage modifié");
     };
     const del = $("#pDel");
     if (del) del.onclick = () => {
